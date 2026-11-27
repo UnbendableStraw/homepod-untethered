@@ -25,6 +25,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+# radare2 prefixes lines with control-flow graph art (box-drawing + arrowheads),
+# e.g. "  ┌─< 0x144c8 ...". Strip any leading run of whitespace, box-drawing
+# (U+2500–U+257F), arrows (U+2190–U+21FF) and ASCII < > | before the address, so
+# those adorned lines parse like any other. The class excludes hex digits, so an
+# address is never eaten.
+_LEAD_ART = re.compile(r"^[\s─-╿←-⇿<>|]+")
 # A leading address: optional 0x, hex digits, optional trailing colon, then space.
 _ADDR = re.compile(r"^\s*(?:0x)?([0-9a-fA-F]+):?\s+(.*)$")
 # A machine-code token: one 32-bit word, or a single byte pair.
@@ -75,6 +81,7 @@ def _split_ops(operand_text: str) -> list[str]:
 
 def parse_line(line: str) -> "Insn | None":
     """Parse one listing line, or return None if it holds no instruction."""
+    line = _LEAD_ART.sub(" ", line)
     m = _ADDR.match(line)
     if not m:
         return None

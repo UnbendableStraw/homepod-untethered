@@ -33,7 +33,9 @@ GUARD_CC_UNSIGNED = frozenset({"hs", "cs", "lo", "cc", "hi", "ls"})
 GUARD_CC_SIGNED = frozenset({"ge", "lt", "gt", "le"})
 GUARD_CC = GUARD_CC_UNSIGNED | GUARD_CC_SIGNED
 
-_IMM = re.compile(r"^#(-?)(?:0x([0-9a-fA-F]+)|(\d+))$")
+# Immediate operand. The leading '#' is optional: llvm-objdump/otool/objdump and
+# the FINDINGS.md notation write '#0x28', but radare2 writes a bare '0x28'.
+_IMM = re.compile(r"^#?(-?)(?:0x([0-9a-fA-F]+)|(\d+))$")
 
 # Mnemonics that do NOT write a general-purpose register (so they never clear a
 # tracked role via a destination). Everything else is assumed to write ops[0].

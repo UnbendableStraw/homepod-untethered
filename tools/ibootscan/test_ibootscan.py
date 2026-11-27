@@ -111,6 +111,22 @@ class ParseLineTests(unittest.TestCase):
         self.assertEqual(i.ops, ("w8", "w8", "#0xffff"))
         self.assertNotIn(";", i.raw)
 
+    def test_radare2_graph_art_stripped(self):
+        # r2 prefixes branch-adorned lines with box-drawing/arrow graph art.
+        i = asm.parse_line("  ┌─< 0x000144c8      e8000034       cbz w8, 0x144e4")
+        self.assertIsNotNone(i)
+        self.assertEqual(i.addr, 0x144C8)
+        self.assertEqual(i.mnemonic, "cbz")
+        i2 = asm.parse_line("       │└─> 0x000144e4      39070011       add w25, w25, 1")
+        self.assertEqual((i2.addr, i2.mnemonic), (0x144E4, "add"))
+
+    def test_radare2_bare_immediate(self):
+        # r2 writes immediates without a leading '#'.
+        i = asm.parse_line("0x000144d0      29a100d1       sub x9, x9, 0x28")
+        self.assertEqual((i.mnemonic, i.ops), ("sub", ("x9", "x9", "0x28")))
+        self.assertEqual(idiom.imm_val("0x28"), 0x28)   # bare immediate parses
+        self.assertEqual(idiom.imm_val("#0x28"), 0x28)  # '#'-prefixed still parses
+
     def test_blank_and_label_lines_skipped(self):
         self.assertIsNone(asm.parse_line(""))
         self.assertIsNone(asm.parse_line("   "))
@@ -164,6 +180,28 @@ class IdiomGoldTests(unittest.TestCase):
         self.assertEqual(g.count_reg, 8)         # w8 = on-disk cpm_count
         self.assertEqual(g.cc, "hs")
         self.assertFalse(g.signed)
+
+    def test_detects_guard_in_real_radare2_output(self):
+        # The actual r2 -n disassembly of iBoot-5540's checkpoint-map guard
+        # (0x144c8-0x144e0): graph art, bare immediates, register divisor. This
+        # is the exact text read from a real decrypted iBoot; the detector must
+        # recover the same guard the hand audit found (FINDINGS.md:6392-6401).
+        real = (
+            "        ┌─< 0x000144c8      e8000034       cbz w8, 0x144e4\n"
+            "        │   0x000144cc      894a40b9       ldr w9, [x20, 0x48]\n"
+            "        │   0x000144d0      29a100d1       sub x9, x9, 0x28\n"
+            "        │   0x000144d4      0a058052       mov w10, 0x28\n"
+            "        │   0x000144d8      2909ca9a       udiv x9, x9, x10\n"
+            "        │   0x000144dc      3f0108eb       cmp x9, x8\n"
+            "       ┌──< 0x000144e0      42000054       b.hs 0x144e8\n"
+            "       │└─> 0x000144e4      39070011       add w25, w25, 1\n"
+        )
+        guards = idiom.find_capacity_guards(asm.parse_listing(real))
+        self.assertEqual(len(guards), 1)
+        g = guards[0]
+        self.assertEqual((g.branch_addr, g.udiv_addr), (0x144E0, 0x144D8))
+        self.assertEqual((g.element_size, g.header, g.count_reg, g.cc),
+                         (0x28, 0x28, 8, "hs"))
 
     def test_mutant_without_idiom_is_unguarded(self):
         # Remove the sub/udiv/cmp/b.hs: the count (w8) is now used unchecked.
