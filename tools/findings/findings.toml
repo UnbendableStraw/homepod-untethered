@@ -1,0 +1,452 @@
+# homepod-untethered — structured findings registry
+#
+# Purpose: a machine-readable distillation of FINDINGS.md (an append-only,
+# chronological lab notebook that must be read bottom-up and contains several
+# retracted mid-session claims). This file lets a reader — or a tool — see each
+# finding's FINAL status without re-reading 6,400 lines, and makes retractions
+# explicit so nobody builds on a disproven result. See README.md:7-8.
+#
+# This registry is a NAVIGATION AID, not a source of truth. FINDINGS.md and
+# README.md remain authoritative; every entry cites them. Where the notebook
+# flip-flopped (notably R5), `status` is the FINAL state and `history` notes the
+# intermediate claim that was withdrawn.
+#
+# Format: TOML, parsed with the Python standard library (tomllib, 3.11+). No
+# third-party dependency — `python3 validate.py` runs first try.
+#
+# status values:
+#   confirmed        proven on hardware or by exact byte/MD5 match
+#   proven_static    proven by instruction-level static analysis (no pod needed)
+#   open             active, not yet resolved
+#   closed_negative  a real avenue tested and shown to be a dead end
+#   retracted        a claim recorded and later disproven; kept so it is not
+#                    re-attempted. `retracted_by` points to what killed it.
+#
+# Cross-reference fields (all optional):
+#   supersedes / superseded_by   this entry replaces / is replaced by another id
+#   retracted_by                 FILE:LINE anchor of what disproved this entry
+#   related                      loosely-coupled entry ids
+#
+# evidence: list of "FILE:LINE" anchors (section starts), relative to repo root.
+
+schema_version = 1
+source_commit_note = """
+Line anchors are valid for FINDINGS.md / README.md / TODO.md as committed in the
+docs-only tree (FINDINGS.md = 6467 lines). Re-run validate.py after editing any
+source document; line drift is expected and the validator only checks that an
+anchor falls within the file, not that it still points at the same text."""
+
+
+# ============================================================= CONFIRMED =====
+
+[[findings]]
+id = "checkm8-t7000-patch"
+status = "confirmed"
+evidence = ["README.md:87", "FINDINGS.md:1712"]
+title = '''checkm8 on t7000si is a single patched instruction at 0x100007e98
+(b.ne -> mov x0,#0) forcing every IM4M property compare to return 0; X.509
+pinning and RSA verification remain intact.'''
+
+[[findings]]
+id = "upside-down-dfu"
+status = "confirmed"
+evidence = ["README.md:80"]
+title = '''"Upside-down power-up" DFU mechanism fully reverse-engineered:
+SecureROM does not read the accelerometer; stage-2 iBoot polls the BMA282 and
+sends 6 bytes to the "Peppy" top-panel MCU (I2C3@0x55) to reset into force-DFU.'''
+
+[[findings]]
+id = "always-dfu-llb-flip"
+status = "confirmed"
+evidence = ["README.md:84", "FINDINGS.md:197"]
+title = '''Flipping byte 0 of LLB (0x30 -> 0xCF) on disk3 (asp_llb) makes
+SecureROM fall into Boot ROM DFU on every upright power-on; fully reversible.'''
+
+[[findings]]
+id = "R3"
+status = "confirmed"
+evidence = ["FINDINGS.md:4860", "README.md:72"]
+related = ["R3.1", "R3.3", "amfi-cdhash-live"]
+title = '''Persistent root userland execution. AMFI validates binaries by cdhash
+against the static trust cache, NOT by path, so any trust-cached Apple binary's
+bytes placed at a cached RunAtLoad root daemon path run as root on every cold
+boot with nothing integrity-protected touched.'''
+
+[[findings]]
+id = "R3.1"
+status = "proven_static"
+evidence = ["FINDINGS.md:4919"]
+related = ["R3"]
+title = '''The seatbelt sandbox follows the SUBSTITUTED BINARY's own
+code-signature entitlements, not the host launchd job. Several shipped binaries
+(syslogd, pppd, nvram) carry no seatbelt profile.'''
+
+[[findings]]
+id = "amfi-cdhash-live"
+status = "confirmed"
+evidence = ["FINDINGS.md:5630"]
+related = ["R3"]
+title = '''AMFI cdhash enforcement is live: a 4-byte-patched copy of a cached
+binary is exec'd then killed with terminationReasonNamespace CODESIGNING. Gives
+a positive, unambiguous readout for future enforcement tests.'''
+
+[[findings]]
+id = "R13"
+status = "confirmed"
+evidence = ["FINDINGS.md:6171"]
+related = ["R13.1", "R13.2"]
+title = '''A saved APTicket (IM4M) + public stock 17M61 payloads reconstruct
+Apple's installed devicetree, kernelcache, sep-firmware and StaticTrustCache
+BYTE-FOR-BYTE (exact MD5 on four independent components). No Apple server, no
+secret. Concrete proof that saving a blob is sufficient to rebuild bootable
+per-device firmware.'''
+
+[[findings]]
+id = "R13.2"
+status = "proven_static"
+evidence = ["FINDINGS.md:6224"]
+related = ["R14", "R13"]
+title = '''APFS pre-auth surface is reachable and its object integrity is
+unkeyed Fletcher-64 (0x1636c -> 0x162c8, seed 0 over obj+8). Arbitrary APFS
+structures can be forged to pass validation offline.'''
+
+[[findings]]
+id = "R12"
+status = "confirmed"
+evidence = ["FINDINGS.md:6107"]
+related = ["retraction-llx-markers", "retraction-iboot-imagelist"]
+title = '''Clean 13.4.8/17M61 restore established as THE baseline (full UART
+capture). Carries two retractions (see retraction entries). Self-inflicted
+damage (job 580: binaries missing from live volume after a no-backup snapshot
+delete) documented and owned.'''
+
+
+[[findings]]
+id = "dgst-enforced"
+status = "confirmed"
+evidence = ["FINDINGS.md:1381"]
+related = ["checkm8-t7000-patch"]
+title = '''DGST (the IM4M digest) IS enforced by SecureROM — proven by paired
+hardware experiment, not by reading the (checkm8-patched) dump. The static
+reading that suggested otherwise was an artefact of gaster's patch being present
+in the ROM bytes that were dumped.'''
+
+[[findings]]
+id = "flash-path-nonce-ignored"
+status = "proven_static"
+evidence = ["FINDINGS.md:1725", "README.md:89"]
+related = ["checkm8-t7000-patch"]
+title = '''A cold flash boot ignores the hardware APNonce: on the flash path
+img4_open passes flags with bit 2 set, steering the check to compare signed BNCH
+against a hash of the unauthenticated IM4R/BNCN (or skipping BNCH entirely if
+BNCN is absent/not 8 bytes) rather than reading the hardware nonce. Corrected and
+emulation-backed.'''
+
+[[findings]]
+id = "snapshot-boot"
+status = "confirmed"
+evidence = ["FINDINGS.md:4802", "README.md:71"]
+related = ["R3", "R13.1"]
+title = '''The OS boots the sealed APFS ROOT SNAPSHOT (com.apple.os.update-<hash>),
+not the live volume — observed every boot via kernel log. Edits to the live
+volume from the SSH ramdisk are invisible to the running OS unless re-snapshotted
+with snaputil. This invalidated several earlier plant-on-the-live-volume results
+and is the foundation of the route-2 (R3) workflow.'''
+
+[[findings]]
+id = "glitch-target-b3"
+status = "proven_static"
+evidence = ["FINDINGS.md:4317", "README.md:95", "TODO.md:91"]
+related = ["cpfm-demotion"]
+title = '''Fault simulation of pristine SecureROM shows that skipping a single
+cbnz at 0x10000781c makes the ROM accept an arbitrary unsigned image regardless
+of CPFM fuses or GPIO straps. A HARDWARE route (needs a voltage glitcher on the
+A8 core rail); recorded as the single most promising fault-injection target.'''
+
+[[findings]]
+id = "sep-anti-replay-generator"
+status = "proven_static"
+evidence = ["FINDINGS.md:2925", "README.md:93"]
+related = ["R13"]
+title = '''Constraint for any future untethered DOWNGRADE (Newport/blackbird
+ART forgery on A8): saved SHSH tickets fetched against random live DFU nonces
+only work tethered. Tickets must be banked against a DETERMINISTIC APNonce
+derived from a known com.apple.System.boot-nonce generator — which requires
+patching p.Bits.KernelOnly on the ramdisk kernelcache to set it. Blobs banked
+the old way are banked wrong for this purpose.'''
+
+# ================================================================== OPEN =====
+
+[[findings]]
+id = "R14"
+status = "open"
+evidence = ["FINDINGS.md:6242"]
+related = ["R13.2", "R14.1", "R14.2", "R14.3"]
+title = '''APFS pre-authentication audit of iBoot-5540.140.12. fsboot MUST parse
+the APFS container on disk1s1 to find the four files it loads, entirely before
+any IMG4 check; integrity is forgeable (R13.2). The remaining candidate surface
+for an unsigned-boot primitive. A campaign, not a one-night job.'''
+
+[[findings]]
+id = "R14.1"
+status = "open"
+evidence = ["FINDINGS.md:6325"]
+related = ["R14", "R14.2", "R14.3"]
+title = '''First audit pass on APFS count sites. 0x14310, 0x14be8, 0x16894
+cleared SAFE; 0x15068/0x15548 initially mislabelled as flag tests (corrected in
+R14.3); 0x144fc flagged top candidate, then resolved in R14.2.'''
+
+[[findings]]
+id = "R14.2"
+status = "open"
+evidence = ["FINDINGS.md:6379"]
+related = ["R14", "R14.1"]
+title = '''0x144fc RESOLVED SAFE — it validates a checkpoint_map_phys_t with a
+correct capacity check (sub; udiv; cmp; b.hs). Yields the validation IDIOM to
+hunt for: its ABSENCE on a path that then indexes node+offset is the bug shape.'''
+
+[[findings]]
+id = "R14.3"
+status = "open"
+evidence = ["FINDINGS.md:6425"]
+related = ["R14", "R14.2"]
+title = '''B-tree code located at 0x14ae8..0x1526c (masked 16-bit o_type==2
+compare). Next action: audit every on-disk-derived count/offset (btn_nkeys,
+btn_table_space{off,len}, toc u16 off/len pairs) for the R14.2 idiom. This is
+the current frontier — "START HERE NEXT SESSION".'''
+
+[[findings]]
+id = "R6"
+status = "open"
+evidence = ["FINDINGS.md:5231", "README.md:74"]
+related = ["R3"]
+title = '''Missing-path probes by privileged daemons. Best lead R6.1:
+mDNSResponder (root, 20 entitlements, no seatbelt) dlopen()s a WiFiAware plugin
+every boot, failing only because a dylib is absent from the writable System
+volume. Open question: does AMFI accept an Apple-signed dylib NOT in this
+build's trust cache?'''
+
+[[findings]]
+id = "R7.3"
+status = "open"
+evidence = ["FINDINGS.md:5306"]
+related = ["R5", "R7.1"]
+title = '''Locate the iBoot code that copies env vars into the DT /chosen node
+(via the name-pointer table near file 0x40500). That is where any
+production/debug gate on boot-args lives. Decides whether R5 could ever work.
+Not yet done.'''
+
+
+# ===================================================== CLOSED (NEGATIVE) =====
+
+[[findings]]
+id = "R4"
+status = "closed_negative"
+evidence = ["FINDINGS.md:5042", "README.md:113"]
+related = ["R4-verified-datapath"]
+title = '''Wi-Fi firmware/nvram path. A file written on the System volume
+reaches a kernel buffer every boot (verified), but the kernel handling is
+hardened: normalizeNVRAM is a correct sanitizer that also strips nocrc;
+prepareImageMap range-checks all size fields. No primitive.'''
+
+[[findings]]
+id = "R4-verified-datapath"
+status = "confirmed"
+evidence = ["FINDINGS.md:4984"]
+related = ["R4"]
+title = '''VERIFIED positive sub-result kept from R4: our bytes appended to a
+System-volume Wi-Fi nvram config are read at boot and mapped into the kernel's
+Broadcom driver, with the mapped length echoed unredacted in syslog (a receipt
+needing no Data-volume access). The DATA PATH is real; only the kernel's
+HANDLING of it was found hardened.'''
+
+[[findings]]
+id = "R5"
+status = "closed_negative"
+evidence = ["README.md:110", "FINDINGS.md:5560"]
+retracted_by = "FINDINGS.md:5560"
+related = ["R5-flips-positive", "R7.3"]
+history = '''R5 flip-flopped: claimed NEGATIVE (03:40), then INVALID/open (03:55
+self-obliteration confound), then "FLIPS POSITIVE" (04:00) from a SoundBoard
+/options read, then corrected back to NEGATIVE (04:40) once /options (NVRAM
+vars) was distinguished from /chosen/boot-args (kernel cmdline).'''
+title = '''Retail iBoot-5540.140.12 stores and exports NVRAM boot-args in
+/options but does NOT populate the installed kernel's /chosen/boot-args on a
+Local boot, so boot-arg-gated attacks are dead untethered. (UART is dark on
+Local boots, so this rests on device-tree/behaviour evidence, not serial.)'''
+
+[[findings]]
+id = "R3.3"
+status = "closed_negative"
+evidence = ["FINDINGS.md:5274"]
+related = ["R3"]
+title = '''No cached boot job passes a file PATH as an argument (only 16 of 183
+pass anything; all flags/labels), and the cache is integrity-enforced, so
+substitution is useful only with binaries that read a HARDCODED config path (the
+R3.2 list).'''
+
+[[findings]]
+id = "R8.1"
+status = "closed_negative"
+evidence = ["FINDINGS.md:5887", "README.md:111"]
+title = '''The iBoot `diags` boot route is closed — no default diags path exists,
+and the console setenv wall is a hardcoded 4-name whitelist (auto-boot,
+boot-args, debug-uarts, pwr-path).'''
+
+[[findings]]
+id = "R7.1"
+status = "closed_negative"
+evidence = ["FINDINGS.md:5335"]
+title = '''iBoot env-variable parser (0x224f0) is correctly bounded: name clamped
+to 0x40, value to 0x261, copied through a size-asserting helper. No length bug.'''
+
+[[findings]]
+id = "R7.2"
+status = "closed_negative"
+evidence = ["FINDINGS.md:5326"]
+title = '''iBoot load_bank_partitions (0x273f0) checks cursor+size*16 <= 0x2000
+before the memcpy; it is the panic-log partition walker, correctly bounded.'''
+
+[[findings]]
+id = "cpfm-demotion"
+status = "closed_negative"
+evidence = ["README.md:106", "TODO.md:150"]
+title = '''Software/PCB CPFM demotion is closed. Bit 0 is one-way clear-only
+(03->02 breaks signed boot without enabling unsigned boot); bit 1 is fuse-locked
+in the on-die shadow; the raw +0x200 aperture ignores writes; board strap
+selector 2 hard-fails at 0x1000078b4 before CPFM is checked.'''
+
+[[findings]]
+id = "mix-and-match"
+status = "closed_negative"
+evidence = ["README.md:107", "FINDINGS.md:2028"]
+title = '''Cross-version/cross-build bootloader mix-and-match is blocked by
+manifest-digest pinning: SecureROM records boot-manifest-hash at handoff,
+pinning downstream stages to the same signed manifest.'''
+
+[[findings]]
+id = "rsa-modulus-overflow"
+status = "closed_negative"
+evidence = ["README.md:108", "FINDINGS.md:1602"]
+title = '''The SecureROM RSA modulus stack overflow (FUN_100012ff4, real EL3 PC
+control in isolation) is UNREACHABLE: cert[0] is verified against the embedded
+Apple Root CA before any attacker-supplied modulus is imported.'''
+
+[[findings]]
+id = "launchd-cache-edits"
+status = "closed_negative"
+evidence = ["README.md:112", "FINDINGS.md:4889"]
+title = '''Editing the launchd mrm.plist service cache is closed: it is
+integrity-enforced (detached mrm.plist.sig, cdhash checked through AMFI). Even a
+1-byte same-length edit triggers a ~3s boot loop. Stock bytes + the same
+snapshot cycle boots fine (the control that matters).'''
+
+[[findings]]
+id = "asp-ans-firmware"
+status = "closed_negative"
+evidence = ["README.md:114", "FINDINGS.md:953"]
+title = '''ASP/ANS firmware (15C4097d, 15D59) audited whole plus cross-build
+diff; no reachable pre-auth untether bug. The convergent lead is closed.'''
+
+
+# ============================================================= RETRACTED =====
+
+[[findings]]
+id = "retraction-llx-markers"
+status = "retracted"
+evidence = ["FINDINGS.md:6129"]
+retracted_by = "FINDINGS.md:6107"
+title = '''RETRACTED: the %llx:%d UART markers are <source-file-hash>:<line>,
+ordinary log/assert sites — NOT error codes. The entire "949 = SEP load failed"
+style decode table built on them is void.'''
+
+[[findings]]
+id = "retraction-iboot-imagelist"
+status = "retracted"
+evidence = ["FINDINGS.md:6137"]
+retracted_by = "FINDINGS.md:6107"
+title = '''RETRACTED: the earlier claim that iBoot's image-list print was
+unreachable. The baseline log shows iBoot prints its image list (ibot/dtre with
+sizes) on every Local boot, independently confirming the measured partition
+sizes.'''
+
+[[findings]]
+id = "R5-flips-positive"
+status = "retracted"
+evidence = ["FINDINGS.md:5432"]
+retracted_by = "FINDINGS.md:5560"
+related = ["R5"]
+title = '''RETRACTED: the "R5 flips positive — retail iBoot DOES honour NVRAM
+boot-args" call (04:00). It rested on SoundBoard reading a non-empty value from
+/options (NVRAM vars), which says nothing about the kernel command line
+(/chosen/boot-args). Corrected to NEGATIVE at 04:40.'''
+
+[[findings]]
+id = "nor-iboot-boot-commands"
+status = "retracted"
+evidence = ["FINDINGS.md:5697"]
+retracted_by = "FINDINGS.md:6199"
+superseded_by = ["R13.1"]
+related = ["R13.1"]
+title = '''RETRACTED: "retail NOR iBoot EXECUTES NVRAM boot-commands untethered".
+It rested on the 949 marker, itself retracted as a file:line log point. A
+controlled test (R13.1) shows NVRAM boot-command is inert on
+iBoot-5540.140.12 RELEASE.'''
+
+[[findings]]
+id = "R13.1"
+status = "proven_static"
+evidence = ["FINDINGS.md:6199"]
+supersedes = ["nor-iboot-boot-commands"]
+related = ["R13", "R14"]
+title = '''Controlled test: iBoot does NOT honour NVRAM boot-command. The
+cold-boot UART marker sequence is identical line-for-line to the baseline Local
+boot; the `upgrade`/`recover` targets are NOT reachable from NVRAM on a retail
+unit. fsboot on the FIRST volume (System, disk1s1) is the only path iBoot takes.'''
+
+[[findings]]
+id = "boot-is-system-root"
+status = "retracted"
+evidence = ["FINDINGS.md:5808"]
+retracted_by = "FINDINGS.md:5915"
+superseded_by = ["R9"]
+title = '''RETRACTED/superseded: the claim that iBoot's /boot is the System
+volume root. R9 (job 565) showed the boot chain is NOT on any mounted volume —
+iBoot boots from a raw ASP NAND boot partition the OS never mounts.'''
+
+[[findings]]
+id = "R9"
+status = "proven_static"
+evidence = ["FINDINGS.md:5915"]
+supersedes = ["boot-is-system-root"]
+related = ["R10", "R11"]
+title = '''The boot chain is on a raw ASP NAND boot partition that the OS never
+mounts, which retroactively explains every null result from plant-on-the-mounted-
+volume experiments. Superseded "/boot = System volume root".'''
+
+[[findings]]
+id = "R10"
+status = "proven_static"
+evidence = ["FINDINGS.md:5973"]
+related = ["R9", "R11"]
+title = '''Found the real boot storage: raw IMG4 firmware partitions. The device
+list was incomplete all session; disk2 = Apple Firmware Media (asp_fw),
+disk3 = Apple LLB Media (asp_llb). This is the untethered lever.'''
+
+[[findings]]
+id = "R11"
+status = "proven_static"
+evidence = ["FINDINGS.md:6036"]
+related = ["R9", "R10", "R13"]
+title = '''Firmware partitions fully parsed; APTicket extracted
+(fw/apticket-17M61.im4m, 4818 B); bdev <-> /dev mapping completed. kernelcache
+source location still unresolved at this point (later settled by R12/R13).'''
+
+[[findings]]
+id = "sep-hexdecode-overflow"
+status = "retracted"
+evidence = ["FINDINGS.md:465"]
+retracted_by = "FINDINGS.md:659"
+title = '''RETRACTED: the claimed pre-authentication heap overflow in the SEP
+firmware file path / hex-decode. Shown UNREACHABLE — cert[0] / chain is verified
+before the vulnerable path is reached.'''
