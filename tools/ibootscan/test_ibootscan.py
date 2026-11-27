@@ -412,6 +412,40 @@ class MulRefinementTests(unittest.TestCase):
         self.assertEqual([s.kind for s in sites], ["madd-stride"])
 
 
+class AdrRodataTests(unittest.TestCase):
+    def test_adr_based_load_is_not_tainted(self):
+        # Real jump-table shape (iBoot-5540 0x1568c-0x1569c): a byte read through
+        # an `adr` base is iBoot rodata, not on-disk data, so the downstream
+        # scaled add must NOT be flagged.
+        blk = """
+        0x100  adr x10, 0x44aa8
+        0x104  ldrb w12, [x10, x9]
+        0x108  add x11, x11, x12, lsl 2
+        """
+        self.assertEqual(taint.find_index_sites(asm.parse_listing(blk)), [])
+
+    def test_adrp_add_pointer_is_rodata(self):
+        blk = """
+        0x100  adrp x10, 0x44000
+        0x104  add x10, x10, 0xaa8
+        0x108  ldr w12, [x10, x9]
+        0x10c  add x11, x19, x12, lsl 2
+        """
+        sites = taint.find_index_sites(asm.parse_listing(blk))
+        self.assertEqual([s for s in sites if s.addr == 0x10C], [])
+
+    def test_non_adr_load_still_taints(self):
+        # Positive control: a load through an ON-DISK pointer (from the node)
+        # must still taint, so the scaled add IS flagged.
+        blk = """
+        0x100  ldr x10, [x19, 0x60]
+        0x104  ldrb w12, [x10, x9]
+        0x108  add x11, x19, x12, lsl 2
+        """
+        kinds = [s.kind for s in taint.find_index_sites(asm.parse_listing(blk))]
+        self.assertIn("add-scaled", kinds)
+
+
 class CLITests(unittest.TestCase):
     def setUp(self):
         self._tmp = TemporaryDirectory()

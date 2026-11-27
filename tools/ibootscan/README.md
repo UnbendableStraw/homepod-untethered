@@ -89,7 +89,7 @@ gate a script or CI step.
 | :--- | :--- |
 | `asm.py` | tolerant ARM64 listing parser → `Insn(addr, mnemonic, ops)` |
 | `idiom.py` | R14.2 capacity-guard detector + immediate range-check detector |
-| `taint.py` | intraprocedural taint → on-disk-derived index sites |
+| `taint.py` | intraprocedural taint → on-disk-derived index sites (loads through an `adr`/`adrp` rodata pointer are trusted, not on-disk) |
 | `scan.py` | pairs guards with sites → graded `Report` |
 | `cli.py`, `__main__.py` | `python3 -m ibootscan {scan,guards}` |
 | `test_ibootscan.py` | `unittest`: parser dialects, idiom gold, taint, scan |

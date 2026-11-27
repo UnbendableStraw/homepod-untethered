@@ -126,6 +126,7 @@ def _displacement_regs(insns: list[Insn]) -> set:
 def find_index_sites(insns: list[Insn]) -> list[IndexSite]:
     """Taint-propagate over `insns` and return on-disk-derived index sites."""
     tainted: set = set()
+    adr_based: set = set()   # registers holding an iBoot rodata/code pointer
     sites: list[IndexSite] = []
     disp_regs = _displacement_regs(insns)
 
@@ -166,25 +167,41 @@ def find_index_sites(insns: list[Insn]) -> list[IndexSite]:
             if idx:
                 sites.append(IndexSite(insn.addr, insn, tuple(idx), "add-scaled"))
 
-        # --- update taint state ---
+        # --- update taint + adr-based (rodata-pointer) state ---
+        mr = _mem_regs(insn.ops[-1]) if (insn.ops and "[" in insn.ops[-1]) else []
+        base_reg = mr[0] if mr else None
+
+        # Does this instruction PRODUCE an iBoot rodata/code pointer in dest?
+        # `adr`/`adrp` do; `adrp xD,page ; add xD,xD,#:lo12:...` keeps it; so does
+        # a plain `mov` of such a register.
+        makes_adr = (m in ("adr", "adrp")) or (
+            m in ("add", "mov", "orr") and len(insn.ops) >= 2
+            and reg_num(insn.ops[1]) in adr_based)
+
         if _is_load(insn):
-            # loads bring attacker-controlled data in; taint the dest(s).
-            if m in ("ldp", "ldpsw") and len(insn.ops) >= 2:
-                for o in insn.ops[:2]:
-                    r = reg_num(o)
-                    if r is not None:
-                        tainted.add(r)
-            elif dest is not None:
-                tainted.add(dest)
+            # A load THROUGH a rodata pointer reads trusted constant-table data,
+            # not the attacker-controlled on-disk structure: do not taint it.
+            from_rodata = base_reg in adr_based
+            dests = ([reg_num(o) for o in insn.ops[:2]]
+                     if m in ("ldp", "ldpsw") and len(insn.ops) >= 2 else [dest])
+            for r in dests:
+                if r is None:
+                    continue
+                tainted.discard(r) if from_rodata else tainted.add(r)
+                adr_based.discard(r)  # a loaded value is not itself a rodata ptr
+        elif makes_adr and dest is not None:
+            adr_based.add(dest)
+            tainted.discard(dest)
         elif m in ("mov", "movz") and dest is not None and len(insn.ops) >= 2 \
                 and reg_num(insn.ops[1]) is None:
-            tainted.discard(dest)  # mov of an immediate -> clean
+            tainted.discard(dest)   # mov of an immediate -> clean
+            adr_based.discard(dest)
         elif m in _PROP and dest is not None:
-            if any(s in tainted for s in _src_regs(insn)):
-                tainted.add(dest)
-            else:
-                tainted.discard(dest)
+            tainted.add(dest) if any(s in tainted for s in _src_regs(insn)) \
+                else tainted.discard(dest)
+            adr_based.discard(dest)
         elif dest is not None:
-            tainted.discard(dest)  # unknown op producing a value -> treat clean
+            tainted.discard(dest)   # unknown op producing a value -> treat clean
+            adr_based.discard(dest)
 
     return sites
