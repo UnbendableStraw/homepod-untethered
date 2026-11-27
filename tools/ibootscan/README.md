@@ -24,8 +24,13 @@ scale, and grades each index site:
 
 | Verdict | Meaning |
 | :--- | :--- |
-| `UNGUARDED` | On-disk-derived index with **no** capacity guard earlier in the range. The bug signature — audit first. |
-| `GUARDED?` | A capacity guard precedes the site. Likely safe, but **confirm by hand** that the guard's count actually bounds *this* index — the `?` is deliberate. |
+| `UNGUARDED` | On-disk-derived index with **no** guard earlier in the range. The bug signature — audit first. |
+| `GUARDED?` | A guard precedes the site — either the R14.2 capacity idiom, or a simple immediate range check (`cmp idx, #imm; b.hi/b.hs`) that bounds *this* index (common for jump tables and fixed-size arrays). Likely safe, but **confirm by hand** — the `?` is deliberate. |
+
+The index finder also distinguishes a fused `madd`/address computation (always an
+index) from a pure `mul` product: a product is only treated as an index when its
+result is later used as a memory displacement, so a `size = count * stride`
+passed to a call (not a memory index) is not flagged.
 
 ## What it is NOT
 
@@ -83,7 +88,7 @@ gate a script or CI step.
 | File | Contents |
 | :--- | :--- |
 | `asm.py` | tolerant ARM64 listing parser → `Insn(addr, mnemonic, ops)` |
-| `idiom.py` | R14.2 capacity-guard detector (register dataflow) |
+| `idiom.py` | R14.2 capacity-guard detector + immediate range-check detector |
 | `taint.py` | intraprocedural taint → on-disk-derived index sites |
 | `scan.py` | pairs guards with sites → graded `Report` |
 | `cli.py`, `__main__.py` | `python3 -m ibootscan {scan,guards}` |

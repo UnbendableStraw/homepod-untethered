@@ -344,6 +344,74 @@ class ScanGoldTests(unittest.TestCase):
         self.assertIn("index sites", text)
 
 
+class RangeCheckTests(unittest.TestCase):
+    def test_find_range_check(self):
+        checks = idiom.find_range_checks(
+            asm.parse_listing("0x10  cmp w8, 0xf\n0x14  b.hi 0x20\n"))
+        self.assertEqual(len(checks), 1)
+        self.assertEqual((checks[0].reg, checks[0].bound, checks[0].cc),
+                         (8, 0xF, "hi"))
+
+    def test_jumptable_index_is_guarded_by_range_check(self):
+        # Real shape from iBoot-5540 0x15954-0x15978: a loaded value is masked to
+        # 4 bits, range-checked (cmp #0xf; b.hi), then used to index a 16-entry
+        # jump table. The ldrb index must be graded GUARDED?, not UNGUARDED.
+        jt = """
+        0x100  ldr x8, [x1]
+        0x104  lsr x8, x8, 0x3c
+        0x108  cmp w8, 0xf
+        0x10c  b.hi 0x120
+        0x110  adr x9, 0x44ab4
+        0x114  ldrb w11, [x9, x8]
+        0x118  br x10
+        """
+        report = scanmod.scan(asm.parse_listing(jt))
+        v = [v for v in report.verdicts if v.site.addr == 0x114]
+        self.assertEqual(len(v), 1)
+        self.assertEqual(v[0].verdict, "GUARDED?")
+        self.assertTrue(v[0].range_checks)
+
+    def test_range_check_on_other_reg_does_not_clear_site(self):
+        # a bound on w0 must NOT clear a site indexed by a different tainted reg
+        blk = """
+        0x100  ldr x8, [x1]
+        0x104  cmp w0, 0xf
+        0x108  b.hi 0x120
+        0x10c  ldrb w11, [x9, x8]
+        """
+        report = scanmod.scan(asm.parse_listing(blk))
+        v = [v for v in report.verdicts if v.site.addr == 0x10C][0]
+        self.assertEqual(v.verdict, "UNGUARDED")
+
+
+class MulRefinementTests(unittest.TestCase):
+    def test_pure_mul_feeding_a_call_is_not_an_index(self):
+        # size = on-disk count * stride, passed to a call: NOT a memory index.
+        blk = """
+        0x10  ldr w9, [x19, 0x24]
+        0x14  mul x2, x9, x22
+        0x18  bl 0x1000
+        """
+        self.assertEqual(taint.find_index_sites(asm.parse_listing(blk)), [])
+
+    def test_pure_mul_used_as_displacement_is_an_index(self):
+        blk = """
+        0x10  ldr w9, [x19, 0x24]
+        0x14  mul x2, x9, x22
+        0x18  ldr w0, [x19, x2]
+        """
+        sites = taint.find_index_sites(asm.parse_listing(blk))
+        self.assertIn("mul-index", [s.kind for s in sites])
+
+    def test_fused_madd_still_flagged(self):
+        blk = """
+        0x10  ldr w24, [x19, 0x24]
+        0x14  madd x26, x24, x27, x19
+        """
+        sites = taint.find_index_sites(asm.parse_listing(blk))
+        self.assertEqual([s.kind for s in sites], ["madd-stride"])
+
+
 class CLITests(unittest.TestCase):
     def setUp(self):
         self._tmp = TemporaryDirectory()

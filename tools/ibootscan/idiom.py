@@ -103,10 +103,56 @@ class CapacityGuard:
         return self.cc in GUARD_CC_SIGNED
 
 
+@dataclass(frozen=True)
+class RangeCheck:
+    """A simple immediate bound on a register: `cmp reg, #imm` + a guarding
+    branch. Common for jump tables and fixed-size arrays (e.g. `cmp w8,#0xf;
+    b.hi`). Not the R14.2 capacity idiom, but a real bound on `reg`."""
+
+    cmp_addr: int
+    branch_addr: int
+    reg: "int | str"
+    bound: int
+    cc: str
+
+
 def _dest_reg(insn: Insn) -> "int | str | None":
     if insn.mnemonic in _NO_GPR_DEST or not insn.ops:
         return None
     return reg_num(insn.ops[0])
+
+
+def find_range_checks(insns: list[Insn]) -> list[RangeCheck]:
+    """Return every `cmp reg, #imm` + guarding-branch range check, in order.
+
+    This bounds the compared register directly, so (unlike a capacity guard) the
+    scanner can tie it to a specific index register."""
+    pending = None            # (reg, imm, cmp_addr)
+    last_flag_is_imm_cmp = False
+    checks: list[RangeCheck] = []
+
+    for insn in insns:
+        m = insn.mnemonic
+        if m.startswith("b.") and insn.cc in GUARD_CC and pending is not None \
+                and last_flag_is_imm_cmp:
+            reg, imm, cmp_addr = pending
+            checks.append(RangeCheck(cmp_addr, insn.addr, reg, imm, insn.cc))
+            pending = None
+            continue
+
+        if m in _FLAG_SETTERS:
+            if m == "cmp" and len(insn.ops) >= 2:
+                reg = reg_num(insn.ops[0])
+                imm = imm_val(insn.ops[1])
+                if reg is not None and imm is not None:
+                    pending = (reg, imm, insn.addr)
+                    last_flag_is_imm_cmp = True
+                else:
+                    pending, last_flag_is_imm_cmp = None, False
+            else:
+                pending, last_flag_is_imm_cmp = None, False
+
+    return checks
 
 
 def find_capacity_guards(insns: list[Insn]) -> list[CapacityGuard]:

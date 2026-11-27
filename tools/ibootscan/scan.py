@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import asm
-from .idiom import CapacityGuard, find_capacity_guards
+from .idiom import CapacityGuard, RangeCheck, find_capacity_guards, find_range_checks
 from .taint import IndexSite, find_index_sites
 
 
@@ -26,6 +26,7 @@ class SiteVerdict:
     site: IndexSite
     verdict: str                    # "UNGUARDED" | "GUARDED?"
     preceding_guards: tuple         # CapacityGuards before the site, in range
+    range_checks: tuple = ()        # RangeChecks bounding this index, before it
 
 
 @dataclass(frozen=True)
@@ -53,13 +54,18 @@ def scan(insns: list, lo: "int | None" = None, hi: "int | None" = None) -> Repor
         hi = max((i.addr for i in window), default=0) + 4
 
     guards = find_capacity_guards(window)
+    rchecks = find_range_checks(window)
     sites = find_index_sites(window)
 
     verdicts = []
     for s in sites:
         before = tuple(g for g in guards if g.branch_addr < s.addr)
-        verdict = "GUARDED?" if before else "UNGUARDED"
-        verdicts.append(SiteVerdict(site=s, verdict=verdict, preceding_guards=before))
+        # a range check only clears a site if it bounds one of ITS index regs
+        rc = tuple(c for c in rchecks
+                   if c.branch_addr < s.addr and c.reg in s.index_regs)
+        verdict = "GUARDED?" if (before or rc) else "UNGUARDED"
+        verdicts.append(SiteVerdict(site=s, verdict=verdict,
+                                    preceding_guards=before, range_checks=rc))
 
     return Report(
         lo=lo, hi=hi, insn_count=len(window),
@@ -87,14 +93,20 @@ def format_report(report: Report) -> str:
                      f"{s.insn.raw}   (tainted idx x{idx}, {s.kind})")
         if v.preceding_guards:
             addrs = ", ".join(f"0x{g.branch_addr:x}" for g in v.preceding_guards)
-            lines.append(f"              preceding guard(s): {addrs} "
+            lines.append(f"              capacity guard(s): {addrs} "
                          f"— confirm they bound this index")
+        if v.range_checks:
+            rc = ", ".join(f"0x{c.cmp_addr:x} (<= 0x{c.bound:x})"
+                           for c in v.range_checks)
+            lines.append(f"              range check(s) on this index: {rc}")
     lines.append("")
     n = len(report.unguarded)
     if n:
         lines.append(f"=> {n} UNGUARDED site(s): on-disk index with no preceding "
                      f"capacity check. Audit first (FINDINGS.md:6461).")
-    else:
+    elif report.verdicts:
         lines.append("=> no UNGUARDED sites in range "
-                     "(every on-disk index has a preceding capacity guard).")
+                     "(every on-disk index has a preceding guard or range check).")
+    else:
+        lines.append("=> no on-disk-derived index sites in range.")
     return "\n".join(lines)

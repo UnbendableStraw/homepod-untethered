@@ -41,6 +41,15 @@ _NO_DEST = frozenset({
 
 _BRACKET_SEP = re.compile(r"[,\s!]+")
 
+# A fused multiply-add (madd/umaddl/smaddl) computes base + n*m directly — an
+# ADDRESS, always an index candidate. A pure product (mul/umull/smull) is only an
+# index if its result is later used as a memory displacement; a product fed to a
+# call is a size, not an index. Real iBoot code (size = count*block_size passed to
+# a helper) is the false-positive class this split removes.
+_FUSED_MADD = frozenset({"madd", "umaddl", "smaddl"})
+_PURE_MUL = frozenset({"mul", "umull", "smull"})
+_SHIFT_KW = ("lsl", "lsr", "uxtw", "sxtw", "uxth", "sxth")
+
 
 @dataclass(frozen=True)
 class IndexSite:
@@ -50,7 +59,7 @@ class IndexSite:
     addr: int
     insn: Insn
     index_regs: tuple  # the tainted register keys used as index/scale
-    kind: str          # "load-index" | "store-index" | "madd-stride" | "add-scaled"
+    kind: str          # load-index | store-index | madd-stride | mul-index | add-scaled
 
 
 def _mem_regs(operand: str) -> list:
@@ -97,10 +106,28 @@ def _src_regs(insn: Insn) -> list:
     return regs
 
 
+def _displacement_regs(insns: list[Insn]) -> set:
+    """Registers used anywhere in the window as a memory index or address scale.
+    A pure product is only an index if its destination lands in this set."""
+    regs: set = set()
+    for insn in insns:
+        for op in insn.ops:
+            if "[" in op:
+                regs.update(_mem_regs(op)[1:])  # non-base operands
+        if insn.mnemonic in ("add", "sub") and len(insn.ops) >= 4 \
+                and any(k in " ".join(insn.ops) for k in _SHIFT_KW):
+            for o in insn.ops[2:]:
+                r = reg_num(o)
+                if r is not None:
+                    regs.add(r)
+    return regs
+
+
 def find_index_sites(insns: list[Insn]) -> list[IndexSite]:
     """Taint-propagate over `insns` and return on-disk-derived index sites."""
     tainted: set = set()
     sites: list[IndexSite] = []
+    disp_regs = _displacement_regs(insns)
 
     for insn in insns:
         m = insn.mnemonic
@@ -115,11 +142,19 @@ def find_index_sites(insns: list[Insn]) -> list[IndexSite]:
             idx = [r for r in _mem_regs(insn.ops[-1])[1:] if r in tainted]
             if idx:
                 sites.append(IndexSite(insn.addr, insn, tuple(idx), "store-index"))
-        elif m in ("madd", "mul", "umull", "smull", "umaddl", "smaddl") and len(insn.ops) >= 3:
+        elif m in _FUSED_MADD and len(insn.ops) >= 3:
+            # base + n*m: a direct address computation.
             factors = [reg_num(insn.ops[1]), reg_num(insn.ops[2])]
             idx = [r for r in factors if r in tainted]
             if idx:
                 sites.append(IndexSite(insn.addr, insn, tuple(idx), "madd-stride"))
+        elif m in _PURE_MUL and len(insn.ops) >= 3 and dest in disp_regs:
+            # pure product, but only an index if its result is used as a
+            # displacement somewhere (dest in disp_regs) — not a size for a call.
+            factors = [reg_num(insn.ops[1]), reg_num(insn.ops[2])]
+            idx = [r for r in factors if r in tainted]
+            if idx:
+                sites.append(IndexSite(insn.addr, insn, tuple(idx), "mul-index"))
         elif m in ("add", "sub") and len(insn.ops) >= 4 \
                 and any(k in " ".join(insn.ops) for k in
                         ("lsl", "lsr", "uxtw", "sxtw", "uxth", "sxth")):
