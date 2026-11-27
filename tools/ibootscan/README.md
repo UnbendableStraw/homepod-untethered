@@ -44,6 +44,26 @@ Its taint model assumes **the scanned function parses an on-disk structure**
 (every load is attacker-controlled). Point it at the specific APFS functions
 (e.g. `0x14ae8..0x1526c`), not arbitrary code, or it will over-report.
 
+### Known blind spots (it will report 0 sites even where indexing happens)
+
+These were established by auditing the real iBoot-5540 btree node accessor at
+`0x17230`, whose TOC key/value indexing the tool does **not** see:
+
+- **Pointer-argument structures.** Taint is seeded only on loads, so a node that
+  arrives as a **pointer argument** (not loaded inside the function) is untrusted
+  but untainted; indexing off it is not flagged. Seeding the argument was tried
+  and abandoned — a pointer argument propagates too widely to taint usefully.
+- **Pointer-derived derefs.** It flags `[base, index]` and scaled adds, but not
+  `add p, node, off; ldr [p]` (a pointer first computed, then dereferenced).
+- **Indirect calls.** When the node read goes through `blr` on a function pointer
+  (an ops/vtable dispatch, as the `0x16b38` btree path does), the walk is on the
+  far side of the call and invisible to a single-function static pass.
+
+Because of these, a clean scan is **necessary, not sufficient**: it rules out the
+inline-unchecked-index shape, not every bug. Confirming a pointer-argument
+consumer (like `0x17230`) still needs a manual read — which here showed its
+per-entry bounds checks are present and correct.
+
 ## Zero dependencies, bring your own binary
 
 Pure stdlib, Python 3.11+. It **decodes no raw bytes** and **ships no Apple
