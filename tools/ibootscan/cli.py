@@ -1,11 +1,12 @@
 """Command-line front end for the R14.3 APFS btree-walker audit aid.
 
-    # disassemble YOUR extracted iBoot however you like, then scan a range:
-    otool -tV iBoot.bin > iboot.lst
+    # A decrypted iBoot is a RAW aarch64 image (not Mach-O): disassemble it at
+    # base 0 so addresses equal the file offsets FINDINGS.md cites, then scan:
+    r2 -a arm -b 64 -qc 's 0x14ae8; pd 600' iBoot.dec > iboot.lst
     PYTHONPATH=tools python3 -m ibootscan scan iboot.lst --lo 0x14ae8 --hi 0x1526c
 
-    # or pipe a disassembly straight in:
-    objdump -d iBoot.bin | python3 -m ibootscan scan - --lo 0x14ae8 --hi 0x1526c
+    # or pipe a disassembly straight in (GNU binutils; g-prefixed on macOS):
+    gobjdump -D -b binary -maarch64 iBoot.dec | python3 -m ibootscan scan - --lo 0x14ae8 --hi 0x1526c
 
     # just list the capacity guards it recognises:
     python3 -m ibootscan guards iboot.lst --lo 0x14418 --hi 0x14790

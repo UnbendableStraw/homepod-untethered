@@ -51,22 +51,29 @@ ops` notation used inside `FINDINGS.md`.
 
 `tools/` is the import root, so run with `PYTHONPATH=tools`:
 
+A decrypted iBoot is a **raw ARM64 image, not a Mach-O**, so `otool`/`nm` and
+Apple's `llvm-objdump` (which has no raw-binary mode) do not apply. Disassemble
+it as raw aarch64 **at base 0**, so the printed addresses equal the file offsets
+this audit uses (`FINDINGS.md` cites `0x14ae8` etc. as file offsets):
+
 ```sh
-# 1. disassemble your extracted iBoot (any of these works)
-otool -tV iBoot.bin            > iboot.lst
-# objdump -d iBoot.bin         > iboot.lst
-# llvm-objdump -d iBoot.bin    > iboot.lst
+# 1. disassemble your extracted, DECRYPTED iBoot as raw aarch64 at base 0.
+#    radare2 (brew install radare2):
+r2 -a arm -b 64 -qc 's 0x14ae8; pd 600' iBoot.dec > iboot.lst
+#    ...or GNU binutils (brew install binutils); note the g-prefix on macOS:
+gobjdump -D -b binary -maarch64 iBoot.dec > iboot.lst
 
 # 2. scan the btree-walker range from FINDINGS.md:6449-6450
 PYTHONPATH=tools python3 -m ibootscan scan iboot.lst --lo 0x14ae8 --hi 0x1526c
-
-# or pipe a disassembly straight in
-objdump -d iBoot.bin | PYTHONPATH=tools python3 -m ibootscan scan - --lo 0x14ae8 --hi 0x1526c
 
 # just list the capacity guards it recognises (e.g. over the checkpoint-map
 # validator, to sanity-check against the known-safe site at 0x144fc)
 PYTHONPATH=tools python3 -m ibootscan guards iboot.lst --lo 0x14418 --hi 0x14790
 ```
+
+(If you ever point it at a Mach-O instead, any disassembler's output works —
+`otool -tV`, `objdump -d`, radare2 — the parser accepts them all. The raw-binary
+note above is specific to iBoot/LLB images.)
 
 `scan` exits **2** when any `UNGUARDED` site is found (0 otherwise), so it can
 gate a script or CI step.
