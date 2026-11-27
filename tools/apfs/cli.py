@@ -8,6 +8,7 @@ an existing image.
     python3 -m apfs checkpoint-map --mappings 2 -o /tmp/cpm.bin
     python3 -m apfs btree --entry k=v --malform value-underflow -o /tmp/node.bin
     python3 -m apfs inspect /tmp/node.bin
+    python3 -m apfs harness
 
 SAFETY: this tool only writes the file you name with -o (or stdout). It never
 touches a device. Writing the block onto hardware is a separate, deliberate `dd`
@@ -107,6 +108,12 @@ def _cmd_btree(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_harness(args: argparse.Namespace) -> int:
+    from .harness import format_report, run
+    print(format_report(run(block_size=args.block_size)))
+    return 0
+
+
 def _cmd_inspect(args: argparse.Namespace) -> int:
     data = Path(args.path).read_bytes()
     bs = args.block_size
@@ -176,6 +183,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="malformation to apply (default: none)",
     )
     bt.set_defaults(func=_cmd_btree)
+
+    hz = sub.add_parser(
+        "harness",
+        help="forge malformed nodes and report Fletcher-valid vs structural reject",
+    )
+    hz.add_argument("--block-size", type=_int, default=0x1000)
+    hz.set_defaults(func=_cmd_harness)
 
     ins = sub.add_parser("inspect", help="list APFS objects in a file and verify")
     ins.add_argument("path")

@@ -57,6 +57,8 @@ from .btree import (
     forge_value_length_underflow,
 )
 from .superblock import build_nx_superblock
+from .validate import Violation, is_well_formed, validate_btree_node
+from .harness import Case, run as run_harness
 
 __all__ = [
     "fletcher64",
@@ -96,4 +98,9 @@ __all__ = [
     "forge_nkeys_exceeds_toc",
     "forge_value_length_underflow",
     "forge_key_offset_past_node",
+    "validate_btree_node",
+    "is_well_formed",
+    "Violation",
+    "run_harness",
+    "Case",
 ]

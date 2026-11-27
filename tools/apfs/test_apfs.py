@@ -55,6 +55,8 @@ from apfs import (  # noqa: E402
 )
 from apfs.superblock import NX_MAGIC  # noqa: E402
 from apfs.cli import main as cli_main  # noqa: E402
+from apfs.validate import validate_btree_node, is_well_formed  # noqa: E402
+from apfs import harness as harness_mod  # noqa: E402
 
 
 def _read_btree_header(block):
@@ -360,6 +362,59 @@ class GoldFixtureTest(unittest.TestCase):
         self.assertGreater(
             checked, 0, "no NXSB container superblock found in the fixture"
         )
+
+
+class ReferenceValidatorTests(unittest.TestCase):
+    """The clean-room oracle: well-formed nodes pass, each forge malformation
+    trips the specific invariant reverse-engineered from iBoot 0x16b38."""
+
+    def _good(self):
+        return BTreeNode(entries=[(b"key01", b"val01"), (b"key02", b"val02")])
+
+    def test_well_formed_node_has_no_violations(self):
+        self.assertTrue(is_well_formed(self._good().build()))
+
+    def test_nkeys_exceeds_toc_capacity(self):
+        block = forge_nkeys_exceeds_toc(self._good())
+        codes = {v.code for v in validate_btree_node(block)}
+        self.assertIn("nkeys_exceeds_toc_capacity", codes)
+
+    def test_key_offset_past_node(self):
+        block = forge_key_offset_past_node(self._good())
+        codes = {v.code for v in validate_btree_node(block)}
+        self.assertIn("key_out_of_bounds", codes)
+
+    def test_value_length_underflow(self):
+        block = forge_value_length_underflow(self._good())
+        codes = {v.code for v in validate_btree_node(block)}
+        self.assertIn("value_offset_underflow", codes)
+
+    def test_table_space_overflow_is_caught(self):
+        # claim a TOC larger than the node can hold (no real entries, just the lie)
+        block = BTreeNode(entries=[], table_space_len_override=0x4000).build()
+        codes = {v.code for v in validate_btree_node(block)}
+        self.assertIn("table_space_overflows_node", codes)
+
+
+class HarnessTests(unittest.TestCase):
+    def test_every_malformation_is_fletcher_valid_but_structurally_rejected(self):
+        cases = {c.name: c for c in harness_mod.run()}
+        # the control passes both axes
+        self.assertTrue(cases["well_formed"].fletcher_valid)
+        self.assertEqual(cases["well_formed"].violations, ())
+        # the three malformations: integrity passes, structure rejects
+        for name in ("nkeys_exceeds_toc", "value_length_underflow",
+                     "key_offset_past_node"):
+            self.assertTrue(cases[name].fletcher_valid, f"{name} should pass Fletcher")
+            self.assertTrue(cases[name].violations, f"{name} should be rejected")
+            self.assertTrue(cases[name].integrity_only_gap)
+
+    def test_report_renders(self):
+        text = harness_mod.format_report(harness_mod.run())
+        self.assertIn("pass Fletcher-64 but fail structural validation", text)
+
+    def test_cli_harness_runs(self):
+        self.assertEqual(cli_main(["harness"]), 0)
 
 
 if __name__ == "__main__":

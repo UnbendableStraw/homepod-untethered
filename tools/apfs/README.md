@@ -55,8 +55,10 @@ directly. Structure offsets are independently grounded in `FINDINGS.md`.
 | `superblock.py` | `build_nx_superblock` (minimal container superblock) |
 | `checkpoint_map.py` | `build_checkpoint_map`, `capacity`/`is_within_capacity` — the correctly-bounded validator from R14.2, incl. an over-count probe builder |
 | `btree.py` | `BTreeNode` + `forge_nkeys_exceeds_toc` / `forge_value_length_underflow` / `forge_key_offset_past_node` — the R14.3 attack-surface node and its malformation generators |
+| `validate.py` | `validate_btree_node` — clean-room reference validator (the harness oracle). Its two node-level invariants (`nkeys ≤ table_space.len/entry_size`; `table_space.len ≤ node − header`) were reverse-engineered this session from iBoot-5540's real node validator at `0x16b38..0x16d68` — the `btree_node_phys_t` walker `FINDINGS.md:6420` could not locate |
+| `harness.py` | `run` / `format_report` — drives every forge malformation through Fletcher-64 and the reference validator, showing which pass integrity but fail structure (the offline half of `FINDINGS.md:6294`) |
 | `cli.py`, `__main__.py` | `python3 -m apfs …` front end: emit a forged block, or inspect an image |
-| `test_apfs.py` | `unittest` suite (self-consistency, hand vectors, checkpoint-map, btree, CLI, gold fixture) |
+| `test_apfs.py` | `unittest` suite (self-consistency, hand vectors, checkpoint-map, btree, reference validator, harness, CLI, gold fixture) |
 
 (`../run_checks.sh` runs the validator, both test suites, and the gold check in one go — suitable for CI; the gold check is skipped automatically off macOS.)
 
@@ -98,9 +100,28 @@ PYTHONPATH=tools python3 -m apfs btree --entry k=v --malform value-underflow -o 
 
 # inspect the objects in a file (or a dumped block) and verify each checksum
 PYTHONPATH=tools python3 -m apfs inspect node.bin
+
+# differential harness: every malformation vs Fletcher-64 vs structural validation
+PYTHONPATH=tools python3 -m apfs harness
 ```
 
 `--malform` is one of `none`, `nkeys`, `value-underflow`, `key-oob`.
+
+The `harness` command prints, for the control node and each malformation, whether
+it passes Fletcher-64 and whether the reference validator rejects it:
+
+```
+case                     fletcher  structural  violated invariant(s)
+well_formed              valid     valid       -
+nkeys_exceeds_toc        valid     REJECT      nkeys_exceeds_toc_capacity
+value_length_underflow   valid     REJECT      value_offset_underflow
+key_offset_past_node     valid     REJECT      key_out_of_bounds
+=> 3 malformation(s) pass Fletcher-64 but fail structural validation.
+```
+
+That gap is the R14 point: integrity (R13.2) is unkeyed and does not stop a
+malformed node; only structural bounds do. These are the inputs to drive through
+iBoot's node validator (audited this session at `0x16b38`) on the hardware loop.
 
 > The CLI only writes the file you pass to `-o` (or stdout). It never touches a
 > device. Writing a block onto hardware is a separate, deliberate `dd` the
