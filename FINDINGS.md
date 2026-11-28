@@ -19080,3 +19080,1944 @@ R102.5  WHAT TO DO NEXT, in order.
 Do NOT build the forge before 1 and 3. A crafted CD that lands at the wrong
 offset is indistinguishable from a tile smash, and we would learn nothing from
 the boot.
+
+
+================================================================================
+R103. THE PANICLOG CANNOT BE CLEARED BY WRITING, AND DOES NOT NEED TO BE.
+      Use the KASLR slide as a freshness check instead.
+================================================================================
+
+R103.1  THE RAW WRITE IS SILENTLY DISCARDED. Fifth instance of the pattern.
+-------------------------------------------------------------------------------
+Job 709 wrote 256 KB of zeros to the panic partition. `dd` reported
+"262144 bytes transferred in 0.514567 secs" with no error. Job 710 then read the
+first 16 KB back:
+    first 16 B : 50454550 01000000 00000000 01000000     = "PEEP" ...
+    PEEP lines : 1
+    mach_absolute_time: 0x9345a83
+The record is completely intact. The write was DISCARDED and dd's success status
+said nothing about it.
+
+The reason is visible in the job-702 DFU log, which we already had:
+    [ANS:client1] Util_Host:attempting to read element=PANICLOG not yet written
+PANICLOG is an ANS-managed ELEMENT surfaced through the controller, not a plain
+writable block range. /dev/disk4 is a synthetic read view of it. Reads work;
+writes go nowhere.
+
+FIFTH INSTANCE of this project's signature hazard - a tool that declines its
+input WITHOUT SAYING SO. The previous four: R72's int('#0x..',0) raising on
+capstone's '#' prefix; the bare `except` that swallowed it; R97.4's back-edge
+scan missing `cbnz x22, #..` because it tested op_str.startswith('#'); and
+R98.5's grep suppressing matches on a binary-ish file. The only reason this one
+was caught in one job rather than becoming a false premise is that the script
+verified the write by reading it back over a WIDER range than it wrote, and
+refused to declare success. Keep doing that: for any write to anything unusual,
+read it back and compare, and never let a tool's exit status stand in for
+evidence.
+
+R103.2  AND IT DOES NOT NEED CLEARING. The element IS replaced between runs.
+-------------------------------------------------------------------------------
+R101.5 called the element "write-once until consumed". That is wrong as stated,
+and the evidence was already in hand: the element held Recipe O's panic
+(mach_absolute_time 0x3637d6b2, slide 0x2c00000) and now holds Recipe P's
+(0x9345a83, slide 0x1a400000). It was replaced between the two experiments
+without anybody clearing anything.
+
+What is true, and what the Recipe P series shows, is that it holds ONE record per
+run and later panics in the same series do not displace it: the Recipe P record
+is from ~6.4 s, an early silent cycle, even though that series went on to a chime
+boot and a pop crash. So:
+  - a multi-cycle boot gives us the EARLIEST panic of that series, not the last;
+  - but a NEW run does replace the previous run's record.
+Exactly which event frees it - a power cycle, or the ramdisk boot's own read of
+the element - is NOT established. Job 706 did a fresh sshrd and the record
+survived that, so a ramdisk boot does not obviously clear it. I am not going to
+assert a mechanism I have not isolated.
+
+R103.3  *** THE FRESHNESS CHECK: THE KASLR SLIDE. ***
+-------------------------------------------------------------------------------
+The mechanism does not matter, because freshness is directly verifiable. The
+kernel slide is randomized per boot, so it labels the record's boot:
+    Recipe O record : slide 0x02c00000
+    Recipe P record : slide 0x1a400000
+A pulled record whose slide differs from the last one we archived is from a new
+boot. A record whose slide AND mach_absolute_time match the previous one is the
+SAME record, and the run produced no new first-panic - a void sample, not a
+negative result. That distinction is worth everything: without it, a re-run that
+fails to panic is indistinguishable from a re-run whose panic was not recorded.
+
+PROTOCOL from here, costing nothing:
+  1. Archive every pulled record with its slide and mach_absolute_time (both
+     already saved: panic-702-recipeO.bin sha256 292338af...,
+     panic-705-recipeP.bin sha256 c6aaa188...).
+  2. the author pulls power after the FIRST reset, so each run has one candidate panic
+     (R100.4).
+  3. On each pull, compare slide against the previous archive. Different slide
+     -> new sample, decode it. Same slide and same mach_absolute_time -> VOID,
+     say so plainly and do not interpret it.
+No raw-device writes anywhere in that. Option 1 is withdrawn: it cannot work,
+and option 2's goal is met by verification rather than clearing.
+
+R103.4  RECIPE P IS STILL ARMED - a re-run costs one boot and no job.
+-------------------------------------------------------------------------------
+Job 707 confirmed the snapshot the pod actually boots still carries Recipe P:
+/(System) 45,591 B, header CRC 63bb2f2d, nEnt/eSz 6000000080000000,
+/sbin/launchd present, root-live-fs re-set. Jobs 708-710 wrote only to
+/mnt1/private/var/tmp on the live volume and to the discarded raw device; the
+snapshot is untouched. So sampling the CD distance (R102.5 step 1) needs no new
+image and no arming job - just cold boots.
+
+
+================================================================================
+R104. *** THE BANDED SWEEP KILLS ITSELF: run 1's reach smashes the kalloc.1664
+      FREE LIST, and the zone integrity check aborts the loop before runs 2-8.
+      The fix is LIVE neighbours - i.e. the app-session's spray is now REQUIRED
+      for a mechanical reason, not just for placement. ***
+================================================================================
+
+Recipe P re-run, job 711. the author pulled power at the first crash (R100.4 protocol).
+Freshness check per R103.3: slide 0x5c00000 vs the previous 0x1a400000, and
+mach_absolute_time 0x93d136b vs 0x9345a83 - a NEW sample, not a void one.
+
+  panic(cpu 1 caller 0xfffffff00d2d3674): "a freed zone element has been
+  modified in zone kalloc.1664: expected 0x4a61001070000010 but found
+  0x30684a616371, bits changed 0x4a6130783a616361, at offset 0 of 1664 in
+  element 0xfffffff0722d3d00, cookies 0x3f00112e4d242e42 0x5352185eac1673b"
+  Kernel slide 0x5c00000.  mach_absolute_time 0x93d136b (~6.46 s at 24 MHz)
+  Panicked task pid 55: xpcproxy, tid 651
+
+A different panic CLASS from sample 1 (which was a data abort in the CS code at
+~6.44 s in watchdogd). Both at ~6.4 s, so the crash point in boot is consistent.
+
+R104.1  BOTH VALUES DECODE, AND THEY PIN THE GEOMETRY EXACTLY.
+-------------------------------------------------------------------------------
+A little-endian u64 read at tile offset +0 is word0 | word1<<32; at +8 it is
+word2 | word3<<32. Solving both reported values against every run's tile:
+
+  found    0x000030684a616371  lo32 0x4a616371 = word0 (MAGIC)
+                               hi32 0x00003068 = word1, j=0, dist>>4 = 0x68
+    -> tile +0 of run j=0, tag 0x70, delta 4096, k=2432, DEPTH 1664
+  expected 0x4a61001070000010  lo32 0x70000010 = word2, tag 0x70, j=0, dist 0x10
+                               hi32 0x4a610010 = word3, dist 0x10
+    -> tile +8 of run j=0, tag 0x70, delta 4096, k=4080, DEPTH 8
+
+The panic reports "at offset 0 of 1664", and xnu compares the head copy against
+the tail backup at offset size-8 = 1656. So:
+    element offset 0    is at DEPTH 1664  -> our tile labelled 1664
+    element offset 1656 is at DEPTH 8     -> our tile labelled 16, read at +8
+    1664 - 1656 = 8.  Internally consistent to the byte.
+And 1664 is exactly the kalloc.1664 element size, so element 0xfffffff0722d3d00
+is THE ELEMENT IMMEDIATELY BELOW THE VICTIM, and it was FREE. We have now
+measured element-granular adjacency directly rather than inferring it.
+
+R104.2  *** ONLY RUN 1 LEFT A TRACE. THE LOOP DIED EARLY. ***
+-------------------------------------------------------------------------------
+Both decoded values carry j=0 and tag 0x70 - run 1, delta 4096. The banding
+design predicts depth 1664 should carry the LAST run whose delta >= 1664, i.e.
+delta 2048, j=4, tag 0x74 (R99.3). It does not. Runs 2-8 left nothing anywhere
+in the record.
+
+The mechanism is now obvious and I should have foreseen it. Run 1 writes 5632
+bytes from V-4096 to V+1536, which covers ~2.5 kalloc.1664 elements below V -
+and it overwrites their FREE-LIST COOKIES at element offsets 0 and 1656, which
+is precisely what the zone integrity check validates on allocation (R-series:
+freed elements hold old_head ^ cookie in their FIRST and LAST 8 bytes; live
+elements have no canary). So:
+    run 1: IOMalloc -> V; write V-4096..V+1536; inflate fails; IOFree(V)
+    next kalloc.1664 allocation - either run 1's own cache-buffer insert at
+    0xdcb6e4..0xdcb708 (also 1536 B, R99.3) or run 2's victim alloc - pops a
+    free element whose cookies we just smashed -> zone_element_was_modified
+    -> PANIC, before runs 2-8 ever execute.
+
+So the deepest-first ordering is self-defeating: the very first write poisons
+the free list, and the allocator trips over it on the next allocation. R99.3's
+"expected and not a flaw" note anticipated that cache buffers would occupy some
+bands; it did NOT anticipate that the first write would abort the sequence.
+THE BANDED SWEEP AS DESIGNED CANNOT WORK. Logged as my design error, not as a
+property of the hardware.
+
+Note also what this does to R102.5 step 1: this sample does NOT give a second
+measurement of where an interesting structure sits. The adjacent element boundary
+at 1664 is fixed by geometry and would appear whatever that element contained.
+We still have exactly ONE CodeDirectory sample (sample 1, depth ~1636 for the CD
+base, solved from CD+0x2c at depth 1592 and CD+4 at depth 1632). Do not report
+this as clustering.
+
+R104.3  *** THE FIX, AND IT IS THE OTHER SESSION'S SPRAY - FOR A NEW REASON. ***
+-------------------------------------------------------------------------------
+The zone integrity check fires only on FREED elements. A LIVE element has no
+free-list cookie to validate, so corrupting its contents trips nothing at
+allocation time. Therefore:
+
+  *** IF THE ELEMENTS BELOW V ARE LIVE, THE MULTI-RUN SEQUENCE SURVIVES. ***
+
+That is exactly what the app-session's SS37.5 NVRAM spray produces: 16 live OSData
+objects at 1664 B each, authored and verified offline, partition checksum
+validated 3/3 against the author's own NOR. Their value was framed as placement
+determinism - deciding WHAT sits below V. This result adds a second, independent
+and arguably more urgent reason: it is what stops the free-list check from
+aborting our write sequence after the first run. Without live neighbours we get
+ONE write per boot no matter how many runs we place, and R98/R99's whole
+"repetition at a fixed address" advantage is unrealisable.
+
+So the dependency is now mechanical, not merely helpful. R97.6's "we were solving
+the wrong problem" was wrong in exactly the way R99.4 began to correct and this
+finishes: their grooming is load-bearing, and our loop cannot be exploited
+without it.
+
+R104.4  WHAT TO DO IN THE MEANTIME, with no spray available on the pod yet.
+-------------------------------------------------------------------------------
+Accept ONE write per boot and vary delta ACROSS boots. A single-run recipe at a
+chosen delta, with the R98.4 positional tile, yields one clean measurement per
+boot and cannot abort itself. Cheap, no new mechanism, and it builds the depth
+map the forge needs:
+  - delta 1664 exactly: the write then ends at bufEnd and starts at the adjacent
+    element's base, touching that element and nothing deeper. The most surgical
+    probe available, and it should reproduce the zone panic deterministically -
+    a control for the method itself.
+  - delta ~1636: aimed at the CodeDirectory base of sample 1. If a CD turns up
+    there again on a different boot, placement really is reproducible and the
+    forge becomes practical without the spray.
+  - larger deltas only once we are prepared to lose the rest of the boot.
+Do NOT build another multi-run image until live neighbours exist. It will abort
+at run 1 and tell us nothing we do not already know.
+
+
+================================================================================
+R105. *** THE INFO LEAK IS DEMONSTRATED - FROM THE RECORD WE ALREADY HAD. ***
+      CD_base, the victim's absolute address, and the CD's FIXED offset of 28
+      into the element below V.
+================================================================================
+
+The app-session's SS40/SS41 (their notes, now 4,447 lines) reframed the scatter
+walk: the leak is not the read's VALUE but the fault ADDRESS. They traced it to
+bytes - the data-abort panic header contains `far: 0x%016lx`
+(0xfffffff00722ebad), and the exception top-half at 0xfffffff007c49418 reads
+both FAR_EL1 (at 0xfffffff007c494b4) and ESR_EL1 - so FAR is in the paniclog by
+construction. They flagged the empirical check as the highest-value open item.
+
+That check was already answerable from the job-706 record, and I had computed the
+number in R101 without recognising what it was.
+
+R105.1  TWO INDEPENDENT ROUTES TO THE SAME ABSOLUTE HEAP ADDRESS.
+-------------------------------------------------------------------------------
+    far                        = 0xfffffff0413dbe8c   (from the paniclog header)
+    scatterOffset (OUR choice) = 0x40060070           (= rev(our word2))
+    CD_base = far - scatterOffset = 0xfffffff00137be1c
+    x12 in the register dump      = 0xfffffff00137be1c
+    MATCH.
+So the leak works, and it is confirmed twice over: once by the FAR arithmetic
+they predicted, and once by x12 being dumped directly. The FAR route is the
+general mechanism - it works even when the base register is not in the dump,
+which is the usual case.
+
+*** This is the runtime leak the endgame has been blocked on since SS2/SS17. One
+faulting boot discloses an absolute kernel heap address. ***
+
+R105.2  AND IT PINS THE VICTIM.
+-------------------------------------------------------------------------------
+Both corrupted CD fields independently fix CD_base's depth:
+    CD+0x2c was our word2 at depth 1592  ->  CD_base at depth 1592 + 0x2c = 1636
+    CD+0x04 was our word0 at depth 1632  ->  CD_base at depth 1632 + 0x04 = 1636
+Consistent. So
+    V = CD_base + 1636 = 0xfffffff00137c480        (16-byte aligned, as required)
+We now have the victim's absolute address on that boot.
+
+R105.3  *** THE CD IS AT A FIXED OFFSET OF 28 INTO THE ELEMENT BELOW V. ***
+-------------------------------------------------------------------------------
+This is geometry, not measurement, and that is what makes it useful. IOMalloc
+returns an element base, so V IS an element base, and kalloc.1664's stride is
+1664 - therefore the element immediately below V always begins at V - 1664. No
+per-boot variation. Combined with R105.2:
+    CD_base = V - 1636, so CD_base sits at offset 1664 - 1636 = 28 into it.
+And 28 is exactly a CS_SuperBlob header with TWO index entries:
+    magic(4) + length(4) + count(4) = 12, then CS_BlobIndex[] at 8 B each
+    12 + 2*8 = 28
+So the corrupted allocation is a CS_SuperBlob - the code-signature blob - living
+in kalloc.1664, with the CodeDirectory as its first blob at offset 28.
+
+That settles the app-session's SS40.5 item 3 / SS41.4 item 1, which they recorded
+as unproven: the CD is not "merely within 1616 B of the victim", it is INSIDE
+THE ELEMENT IMMEDIATELY BELOW THE VICTIM at a deterministic offset. Their
+SS40.6 item 2 guessed kalloc.1664 from watchdogd's 1508-byte reconstitute buffer
+and called it "highly suggestive but not proof"; the offset-28 arithmetic is the
+proof, and it also says WHICH structure (a 2-entry SuperBlob, not a bare CD).
+
+R105.4  WHAT THIS UNLOCKS: THE FORGE BECOMES AIMABLE.
+-------------------------------------------------------------------------------
+delta = 1636 places our write's FIRST byte exactly at CD_base. So a crafted
+payload can lay a valid CodeDirectory header starting at k = 0, with every field
+at a known tile offset, rather than smashing it with tiles. That is R102.4's
+forge, now with a deterministic aim point instead of a hope. This is the first
+time any recipe in this project has had a computed target offset rather than a
+guessed one.
+
+R105.5  WHAT IT DOES *NOT* UNLOCK, and this matters. TWO HARD CONSTRAINTS.
+-------------------------------------------------------------------------------
+The leak gives absolute addresses. It does NOT make the AMFI gate byte reachable,
+for two separate reasons, and I would rather state them now than have either
+session build on a false hope:
+
+ (a) DIRECTION. dst = bufEnd - compressedLength, so the write only ever reaches
+     DOWNWARD from V. On the R101 boot the kernelcache sat ABOVE the heap -
+     text base 0xfffffff021404000 versus V at 0xfffffff00137c480 - so the gate
+     byte at 0xfffffff0074ce8b1 + slide = 0xfffffff0218ce8b1 was above V and
+     simply unreachable. Not all boots are like that: on the R104 boot the
+     element was at 0xfffffff0722d3d00 with text base 0xfffffff00cc04000, i.e.
+     the heap was ABOVE the kernelcache, and the direction would have been
+     right. So reachability is per-boot and now CHECKABLE, because we can
+     compute both addresses.
+ (b) DISTANCE. Even with the direction right, the R104 boot's gap from the
+     element to __DATA_CONST was 0xfffffff0722d3d00 - 0xfffffff00d0a0000
+     = 0x65233d00, about 1.69 GB. Since the write LENGTH equals the reach, that
+     is a 1.69 GB write. Not feasible.
+     So the static-data route still depends entirely on R99.2's open question -
+     whether a short read at a far dst writes anything, i.e. whether reach and
+     length can be DECOUPLED. That question is now the single most valuable one
+     on the board, ahead of the forge, because it is what converts an absolute
+     address into an absolute write.
+
+R105.6  RECIPE Q's CLEAN BOOT: a legitimate outcome, and an honest ambiguity.
+-------------------------------------------------------------------------------
+Recipe Q (single run, delta 1664, tag 0x79) ran a minute or two with no crash.
+That is NOT automatically "the write did not happen":
+  - delta 1664 corrupts exactly ONE element. For it to surface, the kernel must
+    consume that element during the boot. Free-but-never-popped, or live-but-
+    unused, both give a clean boot. Recipe P's delta 4096 covered ~2.5 elements
+    and so had far more chance of hitting something in use.
+  - BUT the poisoned-run-at-sector-0 path is proven only at dbr 16 (recipes
+    B/D/E/F). dbr 3 three-sector runs are proven to write, but only via READ #2
+    (M/N/O/P). A poisoned run at sector 0 with dbr 3 is a combination never
+    tested - Recipe N had a BENIGN run there. So "no write" is not excluded.
+Recipe R (built: single run, sector 0, delta 4096, tag 0x7A, 7,107 B) is the
+discriminator. If R crashes, the sector-0/dbr-3 path works and Q's silence was
+inertness; if R is silent too, that combination is the problem and every
+single-run-at-sector-0 result needs re-reading.
+
+
+================================================================================
+R106. RECIPE R RESOLVES THE DISCRIMINATOR, AND THE ZONE PANIC IS A SECOND,
+      SIMPLER LEAK CHANNEL - IT PRINTS THE ELEMENT ADDRESS *AND* THE COOKIES.
+================================================================================
+
+Job 714 armed Recipe R (single run, sector 0, dbr 3, delta 4096, tag 0x7A, 7,107
+B, CHECKPOINT PASSED). the author cold-booted; it pop-crashed and he pulled power at the
+first crash. Job 715 pulled the record. Freshness per R103.3: slide 0x19c00000,
+new against 0x1a400000 / 0x5c00000 / 0x2c00000.
+
+  panic(cpu 0 caller 0xfffffff0212d3674): "a freed zone element has been
+  modified in zone kalloc.1664: expected 0x4a6100107a000010 but found
+  0x30684a616371, bits changed 0x4a61307830616361, at offset 0 of 1664 in
+  element 0xfffffff002186080, cookies 0x3f00117186e2a000 0x53521d62f93383d"
+  slide 0x19c00000, pid 68 mobileassetd, tid 843, up ~19.88 s
+
+R106.1  *** THE SECTOR-0 / dbr-3 PATH WRITES. Recipe Q's silence was inertness.
+-------------------------------------------------------------------------------
+Both values decode to tag 0x7A, which only Recipe R uses:
+    expected 0x4a6100107a000010 = word2|word3<<32, k=4080 -> element offset 1656,
+                                  dist 16 read at +8 -> DEPTH 8
+    found    0x30684a616371     = word0|word1<<32, word1 0x3068 -> dist>>4 = 0x68
+                                  -> DEPTH 1664, the element base
+Identical geometry to R104.1's Recipe P sample, from a different boot, different
+slide and a different task. So:
+  - Recipe R (delta 4096 at sector 0, dbr 3) WRITES. The combination that had
+    never been tested (R105.6) works.
+  - Therefore Recipe Q's 6+ minutes of silence was reading (i): delta 1664
+    corrupts exactly ONE element, and on that boot it was never consumed.
+    NOT a dead path, and not a bad image.
+  - And the method is REPRODUCIBLE: two independent boots put the element base
+    at depth 1664 and the tail cookie at depth 8, to the byte.
+Recipe Q's result is therefore informative after all: a single-element write is
+simply too surgical to reliably surface. delta 4096 (~2.5 elements) is the right
+sampling reach; delta 1664 is the right *forging* reach once we can aim.
+
+R106.2  *** THE ZONE PANIC PRINTS THE ELEMENT ADDRESS: a second leak channel. ***
+-------------------------------------------------------------------------------
+    "... in element 0xfffffff002186080 ..."
+That is the absolute address of the element immediately below V, printed by the
+panic itself. And since IOMalloc returns an element base and kalloc.1664's stride
+is 1664 (geometry, not measurement):
+    V = element + 1664 = 0xfffffff002186080 + 0x680 = 0xfffffff002186700
+16-byte aligned, as required. So THIS PANIC LEAKS THE VICTIM'S ABSOLUTE ADDRESS
+DIRECTLY.
+
+Compare with R105's channel, which went: aim scatterOffset at unmapped memory ->
+data abort -> read far from the header -> CD_base = far - our offset -> V =
+CD_base + 1636. That one needs a CS SuperBlob to be the neighbour AND the offset
+to land unmapped. This one needs only that the neighbour be FREE, and it prints
+the address outright.
+
+Tally over the three landed samples:
+    P s1  slide 0x1a400000  up  6.43 s  watchdogd      data abort (neighbour LIVE: a CS SuperBlob)
+    P s2  slide 0x05c00000  up  6.46 s  xpcproxy       zone panic, elem 0xfffffff0722d3d00
+    R s1  slide 0x19c00000  up 19.88 s  mobileassetd   zone panic, elem 0xfffffff002186080
+So 2 of 3 boots gave the zone-panic channel, 1 of 3 the data-abort channel.
+Either way we get an absolute heap address. The leak is not a one-off.
+
+Note how far the element addresses roam between boots - 0xfffffff0722d3d00 vs
+0xfffffff002186080 - while the RELATIVE geometry is invariant. That is exactly
+the shape the project has been fighting: relative facts are stable, absolute ones
+are not, which is why a per-boot leak is worth more than any amount of offline
+derivation.
+
+R106.3  THE PANIC ALSO PRINTS THE ZONE COOKIES. Logged as a LEAD, not a plan.
+-------------------------------------------------------------------------------
+    R s1: cookies 0x3f00117186e2a000  0x053521d62f93383d
+    P s2: cookies 0x3f00112e4d242e42  0x05352185eac1673b
+A freed element holds `next ^ cookie` in its first and last 8 bytes. If the
+cookie were known in advance, writing `target ^ cookie` into both copies of a
+freed element would make the next allocation return `target` - an arbitrary
+allocation address, and from there an arbitrary write by whatever legitimately
+uses that allocation. That would be a far stronger primitive than anything we
+hold.
+
+Why it is only a lead:
+ - The cookies are printed BY the panic, i.e. after our write. To use them we
+   would need boot N's cookies in boot N+1, and they are per-boot: xnu sets
+   zp_nopoison_cookie / zp_poisoned_cookie once at boot from early_random().
+ - The two samples do share high bits - 0x3f0011xx and 0x0535_21xx - so the
+   randomization is partial and the structure is fixed. That leaves roughly 40
+   and 44 random bits respectively. Not brute-forceable, and I am not going to
+   dress up a 2-sample coincidence as a pattern.
+ - What WOULD make it usable is any channel that discloses the cookies before
+   our write lands in the same boot. Nothing we have does that today.
+Worth passing to the app-session: where do zp_*_cookie live, how are they
+derived, and is either reachable by a read primitive we already have?
+
+R106.4  WHERE THIS LEAVES THE PLAN.
+-------------------------------------------------------------------------------
+Settled now: the write works from sector 0 at dbr 3; delta 4096 is a reliable
+sampler; the geometry is reproducible to the byte; and TWO independent channels
+leak an absolute heap address, one of which (R106.2) needs nothing but a free
+neighbour.
+Still open, in priority order:
+ 1. R99.2's decoupling question - can a short read at a far dst write at all?
+    This is still the single highest-value item, because it is what turns an
+    absolute address into an absolute WRITE. Direction and distance (R105.5)
+    block the static-data route until it is answered.
+ 2. The forge (R102.4) at delta 1636, now aimable thanks to R105.3's fixed
+    offset of 28. Needs a crafted CodeDirectory rather than tiles.
+ 3. Live neighbours (the app-session's SS37.5 spray) to make multi-run sequences
+    survive the free-list check (R104.3).
+
+
+================================================================================
+R107. *** DECOUPLING FAILS. *** The read validates its range before writing, so
+      reach stays welded to write length. Established by control, not inference.
+      Plus: I retract R101.5's explanation of the 9905 marker.
+================================================================================
+
+R107.1  THE EXPERIMENT AND ITS CONTROL.
+-------------------------------------------------------------------------------
+R99.2 asked the question the whole endgame turned on: dst = bufEnd -
+compressedLength is computed BEFORE the read is issued, so if the backing store
+comes up short and the callee copies what it got, reach and write-length would
+DECOUPLE and we would hold a long-reach short-write - an arbitrary-address write.
+
+I could not settle it statically: the read is a virtual call on
+this->field_0x90 (stored at 0xfffffff007dcb41c) through vtable slot +0x590, and
+a scan of __DATA_CONST found 398 vtables with a code pointer at that slot - too
+coarse to resolve in reasonable time. So it went to hardware, with a control.
+
+  Recipe S (job 716, tag 0x7B): single ZLIB run at sectors 0-2, dbr 3,
+    compressedLength 9728, data fork 4096 B, WHOLE FILE 5,571 B.
+    So the requested range EXCEEDS THE ENTIRE FILE by 4,157 B. dst = V - 8192.
+    RESULT: clean boot, ~6 minutes, no crash.
+
+  Recipe T (job 717, tag 0x7C): IDENTICAL in every respect - same delta 8192,
+    same sector 0, same dbr 3, same dst = V - 8192 - except the fork is FULL
+    LENGTH, 9728 B, file 11,203 B, so the whole requested range EXISTS.
+    RESULT: crashes immediately, before the chime. Three reset cycles captured.
+
+One variable. Therefore:
+  *** a write at V - 8192 IS detectable when the data exists, so Recipe S's
+      silence was the callee REFUSING the short read. It validates the requested
+      range against the media BEFORE touching the destination. ***
+
+R107.2  WHAT THAT CLOSES.
+-------------------------------------------------------------------------------
+compressedLength is simultaneously the reach AND the read length, and the bytes
+must actually come from the file. So:
+    reach <= available bytes from compressedOffset,  and  write length == reach.
+A far reach therefore requires a correspondingly enormous write. Building a 1 GB
+image to reach 1 GB below V would write 1 GB over the kernel. The static-data
+route - R105.5's direction-and-distance problem, and with it the straightforward
+read of the app-session's SS37.2 endgame ("heap-relative write -> arbitrary write
+-> flip one byte") - stays shut on the zlib path.
+
+This is a genuine negative and it cost two boots, which is the right price. Note
+that WITHOUT Recipe T, Recipe S would have been misread as a positive-by-absence
+exactly the way Recipe Q nearly was (R105.6). The lesson stands as a rule: an
+experiment whose negative outcome is "nothing happened" needs a control that
+makes something happen, built at the same time, not afterwards.
+
+R107.3  WHAT REMAINS OPEN, and the next candidate.
+-------------------------------------------------------------------------------
+The LZFSE path. At 0xfffffff007dcb600 `cmp w10,#5 / b.ne 0xfffffff007dcb630`
+routes non-zlib entry types to a genuinely different branch which makes TWO
+allocations (0xdcb73c and 0xdcb754, both bl 0xfffffff007b7bdf0) rather than one,
+and reaches the latch by its own back-edge at 0xdcb910. Nothing establishes that
+its length semantics match zlib's. Type 0x80000007 is the app-session's SS37.1
+task 3, and this result promotes it from "worth a look" to "the only remaining
+candidate for decoupling on this parser".
+Also still open and unaffected by this: the forge (R102.4/R105.4) at delta 1636,
+which needs no decoupling at all because every field it touches is CD-relative.
+
+R107.4  *** RETRACTION: R101.5's EXPLANATION OF THE 9905 MARKER IS WRONG. ***
+-------------------------------------------------------------------------------
+R100.1 flagged `9905b4edc794469:694` appearing in iBoot from boot attempt 3 of
+the Recipe P series, and asked whether it indicated a fallback path that would
+make late-cycle results untrustworthy. R101.5 declared it benign on the theory
+that iBoot was merely logging that a paniclog now existed.
+
+Counting the marker across every screenlog capture in hand kills that theory:
+    bcf122a9 (Recipe P)   5 cycles, 6 marker lines
+    fd489af2 (Recipe R)   2 cycles, 2
+    926501a7 (Recipe T)   3 cycles, 0     <-- crashes every cycle
+    a1537508 (Recipe O)   4 cycles, 0     <-- and Recipe O's boot DID write a
+                                              paniclog: the 38 s data abort
+    44b1c60a              3 cycles, 3
+    6aaeb76c             40 cycles, 34
+    2ce8756b             22 cycles, 19
+A series that definitely wrote a paniclog shows zero marker lines, and a series
+that crashed on every cycle shows zero. So the marker does not track
+paniclog presence. It is UNEXPLAINED, and the hash is not invertible without the
+filename, so I cannot name it from here.
+
+What survives: the NVRAM evidence against a persistent-state fallback is
+unchanged (job 706: the same 10 variables, no boot-breadcrumbs, no failure
+counter), and the protocol fix - pull power after the FIRST reset so record and
+cycle are unambiguous (R100.4) - already removes the practical risk whatever the
+marker means. But R100.1's concern is reopened as *unresolved* rather than
+answered, and any future reasoning that leans on "9905 is benign" must not cite
+R101.5.
+
+Logged as my error: I took a plausible mechanism for an established one, on a
+single series, when counting the other eleven captures would have refuted it in
+one command.
+
+R107.5  RECIPE T's PANICLOG: tag 0x7C, so the S/T comparison is airtight.
+-------------------------------------------------------------------------------
+Job 718 pulled it. Freshness per R103.3: slide 0x09200000, new against
+0x1a400000 / 0x05c00000 / 0x02c00000 / 0x19c00000.
+
+  panic: "a freed zone element has been modified in zone kalloc.1664: expected
+  0x4a6100107c000010 but found 0x30684a616371 ... in element 0xfffffff07face000"
+  slide 0x09200000, pid xpcproxy, uptime 6.212 s
+
+  expected 0x4a6100107c000010 -> word2 = 0x7c000010: tag 0x7C, j 0, dist 0x10
+                                 -> element offset 1656, DEPTH 8 (tail cookie)
+  found    0x30684a616371     -> word1 = 0x3068 -> dist>>4 = 0x68 -> DEPTH 1664
+                                 -> the element base
+  V = element + 1664 = 0xfffffff07face680        (fourth absolute address leaked)
+
+tag 0x7C is Recipe T's and nothing else's. So T demonstrably WROTE while S, with
+only the fork length differing, demonstrably did not. R107.1's conclusion is
+confirmed from both directions rather than inferred from one.
+
+Worth noting: we wrote down to depth 8192, covering ~5 elements, yet the
+detection fired on the one at depth 1664 - the element immediately below V. Same
+in R104.1, R106.1 and here. The allocator pops the nearest free element first, so
+the adjacent element always trips before anything deeper. Consequence for
+design: a deep reach buys no extra detection probability, only extra collateral.
+Shallow-and-aimed beats deep-and-hopeful, which is the opposite of what the
+sweep assumed.
+
+R107.6  A FLAW IN THE TILE, exposed by my own decoder.
+-------------------------------------------------------------------------------
+My tag-hunt tool attributed `0x4a610010` to "tag 0x7B" before finding the real
+answer in word2. That is not a tool bug so much as a payload one: word3 is
+0x4A610000 | (dist & 0xFFFF), which carries POSITION but NO IDENTITY, so it
+cannot distinguish Recipe S from Recipe T from any future recipe at the same
+delta. R98.4 fixed "two of four words carry no position"; it left one word
+carrying no tag.
+FIX for the next tile: spend 4 bits of word3 on the low nibble of the tag -
+   [k+12]  (0x4A61 << 16) | ((tag & 0xF) << 12) | (dist & 0xFFF)
+dist <= 4096 needs 13 bits, so for the forging reaches we care about (delta 1636,
+1664) 12 bits plus a flag is enough; above that, word2 remains the full ruler.
+Then every one of the four words is both self-locating AND self-identifying.
+
+
+================================================================================
+R108. DECOUPLING IS DEAD ON BOTH PATHS. R105.3's SuperBlob CALL WAS WRONG - the
+      measurement was right, the structure was a coincidence fit. And a sober
+      look at what the forge actually buys.
+================================================================================
+
+The app-session's notes are now 4,696 lines, SS44-SS47, and they closed four of
+the five items from NOTE-TO-APP-SESSION-R106. Verified against their own working
+rather than taken from the relay.
+
+R108.1  LZFSE IS FILE-CAPPED TOO. Decoupling is closed on every path we have.
+-------------------------------------------------------------------------------
+Their SS44.1 falsifies the lead I passed over. The LZFSE branch (type 0x80000007,
+the 0xdcb630 path) calls LZFSE_decompress(out, outSize=x20, src=dst,
+srcLen=compressedLength, scratch, 0x801) at 0xdcb7b4 - srcLen IS
+compressedLength, so the source bytes still have to exist in the file and the
+write cannot overflow. Reach is welded to file size identically to zlib.
+So R107.3's "only remaining candidate for decoupling on this parser" is dead,
+and R107.2's conclusion is now general rather than zlib-specific: on this parser
+a far reach always costs a correspondingly enormous write. Good: a redirect of
+mine, tested and refuted in one pass, which is cheaper than it would have been to
+build an LZFSE image on the hope.
+
+R108.2  *** RETRACTION: R105.3's "2-entry CS_SuperBlob" IS WRONG. ***
+-------------------------------------------------------------------------------
+I wrote that CD_base at offset 28 into the element meant a CS_SuperBlob header
+(magic 4 + length 4 + count 4 = 12) plus two 8-byte CS_BlobIndex entries, and
+called the arithmetic "the proof". It is not.
+
+Their SS47 parsed the actual embedded signatures. Every candidate is a standard
+FOUR-entry SuperBlob {CodeDirectory, Requirements, Entitlements, Signature}:
+    watchdogd          sig 1568  CD 1036  ent 444  4 entries  reconstitute 1508
+    CrashHousekeeping  sig 1376  CD  724  ent 563  4 entries  reconstitute 1315
+    IOMFB_bics_daemon  sig 1552  CD  852  ent 608  4 entries  reconstitute 1488
+There is no 2-entry SuperBlob anywhere. What offset 0x1c actually is: the
+csb_mem_kaddr RECONSTITUTE BUFFER places the CD at buffer+0x1c when the binary
+HAS ENTITLEMENTS (and at +0x00 when it does not). 0x1c = 28.
+
+And their geometry check reproduces my measurement exactly: element_base =
+CD_base - 28, V = element_base + 1664 (kalloc.1664 stride) = CD_base + 1636,
+which is what R105.2 measured to the byte.
+
+So the MEASUREMENT stands and the STRUCTURAL CLAIM was a numerical-coincidence
+fit - 12 + 2*8 happens to equal 0x1c. This is precisely the error I warned
+against two sections earlier in R106.3, where I refused to call the repeated
+cookie high bits a pattern on two samples. I applied the standard to their lead
+and not to my own. Noted as my error, and the corrected version is strictly more
+useful: the target class is not "something with a SuperBlob" but
+*** ENTITLED BOOT BINARIES WHOSE cd_len + ent_len + 0x1c FALLS IN [1281,1664]. ***
+
+R108.3  THE FORGE IS FULLY SPECIFIED (their SS45.2). What it needs:
+-------------------------------------------------------------------------------
+The validation context is x27; the CD pointer is x12 = [x27+0x80]. The bounds
+that clamp the hash dereference come from the CONTEXT, not the CD:
+    ldp x9,x10,[x27,#0x10]  @0xa7fa34   the real blob data bounds
+    ldr x9,[x27,#0x20]      @0xa7fa44   a third bound
+    ldr x9,[x27,#0x38]      @0xa7fa50   hash-type descriptor, must be non-zero
+    ldr x12,[x27,#0x80]     @0xa7fa58   the CD base, must be non-zero
+CD header fields consulted before the scatter branch, all big-endian:
+    +0x04 length        the scatter gate's left side
+    +0x08 version       cmp >= 0x201 after rev and lsr #8
+    +0x1c nCodeSlots    read, NOT a gate on this path
+    +0x20 codeLimit     read, NOT a gate on this path
+    +0x2c scatterOffset cbz -> skip; the gate's right side
+And their SS45.1 settles item (b): the memmove at 0xa7fb50 is on the
+NON-scatter fall-through and copies <= 48 bytes of a hash into a 48-byte stack
+buffer. It does not bound scatterOffset. The scatter walk has full freedom.
+
+So a forged CD needs only: land byte 0 on CD_base (delta 1636), version >=
+0x20100, non-zero scatterOffset, and length >= scatterOffset. Four fields.
+
+R108.4  *** BUT BE CLEAR ABOUT WHAT THE FORGE BUYS - AND DOES NOT. ***
+-------------------------------------------------------------------------------
+R102.4 proposed the forge as "a per-binary code-signing bypass". Having now
+traced it with their field map, I do not think that holds, and it is better to
+say so before building:
+  - The hash pointer IS clamped (R102.2: cmp x12,x10 / ccmp x14,x9,#2,hs /
+    b.hi -> fail) and the clamps are CONTEXT fields we do not forge. Our write
+    does cover the reconstitute buffer, so we can place chosen hash bytes inside
+    the real bounds and point hashOffset at them - but then validation compares
+    the page's ACTUAL hash against a hash we chose, and to pass we would have to
+    choose the page's real hash. That makes validation succeed for an unmodified
+    page, which it already does. We cannot modify the binary's pages; we hold one
+    heap write. So forging hashes buys nothing.
+  - What the forge DOES buy is an AIMED, REPEATABLE leak: scatterOffset of our
+    choosing means FAR = CD_base + chosen, so CD_base (and hence V) is disclosed
+    deliberately rather than by luck. And it demonstrates DETERMINISTIC AIM,
+    which is the prerequisite for aiming at anything else.
+That is worth building. It is not the untether.
+
+R108.5  SO WHAT IS ACTUALLY MISSING: PC CONTROL.
+-------------------------------------------------------------------------------
+Working backwards from the goal rather than forwards from the primitive:
+  - The AMFI defeat is one byte at 0xfffffff0074ce8b1 in __DATA_CONST (their
+    SS17.1/SS37.2). Our write cannot reach it: wrong direction on some boots,
+    ~1.69 GB away on others (R105.5), and decoupling is now dead on both paths
+    (R108.1). That route is closed.
+  - So the write must buy control some other way, and the obvious candidate is
+    the one THEY raised in SS37.1 task 2 and nobody has answered:
+    *** does any VTABLE-BEARING C++ object land in 1281..1664? *** A vtable
+    pointer we overwrite is PC control, and PC control is worth more than any
+    amount of data corruption.
+  - And whatever the target, it has to be PLACEABLE below V. Their SS37.5 spray
+    (16 live NVRAM OSData objects) controls occupancy but not identity, and
+    nothing has yet been demonstrated on hardware to put a CHOSEN object there.
+    Our five samples put an entitled reconstitute buffer below V once (P s1), so
+    the by-luck rate is roughly 1 in 5.
+
+Honest status: we hold a reliable write, an uncapped multi-write loop, two
+working leak channels and a measured geometry. We do NOT hold placement control
+or PC control, and the two routes to a one-byte AMFI patch are both closed. The
+next question is not "build the forge" but "what, if anything, in the 1281-1664
+window carries a code pointer" - which is offline work, and theirs.
+
+
+================================================================================
+R109. RECIPE U MISSED (as expected), but the R107.6 FIX WORKED FIRST TRY. And
+      the vtable question came back YES - 15 classes in the window - which means
+      RECIPE Q WAS ALREADY THE PC-CONTROL PROBE AND I MISSED IT.
+================================================================================
+
+R109.1  RECIPE U (job 719, tag 0x7D, forged CD at delta 1636): a MISS.
+-------------------------------------------------------------------------------
+the author cold-booted; it crashed a few seconds after the setup chime. Job 720 pulled
+it. Freshness: slide 0x1ba00000, new. Uptime 29.36 s, pid 68 sucontrollerd.
+
+  panic: "a freed zone element has been modified in zone kalloc.1664: expected
+  0xc0ffee6c8aa27d2a but found 0x4a6163714a61d014, bits changed
+  0x8a9e8d1dc0c3ad3e, at offset 1656 of 1664 in element 0xfffffff0020b8e00"
+
+A zone panic, not a data abort - so NO `far:` line and no aimed leak. The
+neighbour was FREE, so there was no CD there to forge onto. This is P2, the
+expected roughly-4-in-5 outcome. The forged header is unexercised, not refuted.
+
+Three things worth keeping:
+
+ (a) *** R107.6's IDENTITY FIX WORKED ON ITS FIRST BOOT. *** found's low word is
+     0x4a61d014 = 0x4A610000 | (tag & 0xF)<<12 | (dist & 0xFFF), so the nibble
+     0xD reads out tag 0x7D directly. Recipe T's record could not have done that.
+     A payload flaw found on Monday and fixed by Tuesday, verified in silicon.
+ (b) A geometry correction to my own first reading: the dist labels the TILE, not
+     the word. word3 sits +12 into its tile, so "dist 20" at element offset 1656
+     means depth 20 - 12 = 8, which puts the element base at V - 1664 and gives
+     V = 0xfffffff0020b9480, 16-byte aligned. Consistent with all four prior
+     samples. Had I read dist as the word's own depth I would have computed a
+     misaligned V and chased a phantom chunk-boundary effect.
+ (c) *** `expected 0xc0ffee6c8aa27d2a` is arithmetic, not whimsy. *** The
+     expected value is `next ^ cookie`. A kernel pointer's top three bytes are
+     0xffffff, and R106.3 observed the cookie's high bits as 0x3f0011 - and
+     0xffffff ^ 0x3f0011 = 0xc0ffee exactly. So this independently confirms the
+     cookie prefix from a third boot. Still not actionable: SS46's argument stands
+     (the image is built pre-boot, so there is no read-then-write ordering inside
+     one unattended boot), but the observation is now triangulated rather than a
+     two-sample coincidence.
+
+R109.2  *** THE VTABLE QUESTION: YES, FIFTEEN CLASSES. *** (their SS48/SS49)
+-------------------------------------------------------------------------------
+They enumerated every OSMetaClass::OSMetaClass(gMeta, name, super, classSize)
+call site (bl 0xfffffff007b320c8) and pulled the classSize immediate. Fifteen
+vtable-bearing C++ classes have instance sizes inside [1281,1664]. Five are
+platform/IOKit drivers instantiated during device-tree bring-up - BEFORE hdik
+attaches the restore ramdisk, so they are live and persistent when our groom and
+overflow happen:
+    1360  AppleSMC                        platform, very early
+    1360  IOUnifiedAddressTranslator x3   platform IOMMU, early
+    1528  AppleSPU                        platform, early
+    1544  AppleSimpleUARTSync             platform serial, early
+    1552  IODARTMapper                    platform IOMMU, early, MANY instances
+plus 1296 CCFaultReport, 1352 IOHDCP2DPTransmitterAuthSession, 1384
+IOAccelSubmitter2, 1512 IOMFBSwapIORequest, 1304/1624/1632
+AppleBCMWLAN{ConfigManager,TimeSyncEngine,ProximityInterface}, 1640
+IO80211FlowQueueDatabase.
+IODARTMapper is their standout: created early, many instances, and takes a
+virtual call on essentially every DMA mapping, so a corrupted one is dereferenced
+almost immediately.
+
+Note R98.3 already hit AppleBCMWLANTimeSyncEngine's neighbourhood by luck - at
+1624 bytes it is in this list, which retro-explains that sample.
+
+R109.3  *** AND RECIPE Q WAS ALREADY THIS PROBE. I DID NOT NOTICE. ***
+-------------------------------------------------------------------------------
+A C++ object's vptr is at offset 0. delta 1664 puts our byte 0 exactly on the
+element base - a boundary now measured to the byte five times (R104.1, R106.1,
+R107.5, R109.1). So delta 1664 overwrites the neighbour's VPTR with our first
+eight bytes, and the next virtual call through it is PC control.
+
+Recipe Q was delta 1664. Its first eight bytes were the tile's word0|word1, i.e.
+a bogus vptr of 0x00003068_4A616371. It booted clean for 6+ minutes, which simply
+means that boot's neighbour was not a live C++ object in use. I built that recipe
+as a "one-element probe" to sample free/live occupancy and never saw that it was
+simultaneously a PC-control experiment with an incidental payload.
+
+Worth stating why this matters more than the forge: this path needs ONLY the
+downward write we already have. It is independent of the CD forge (R108.4: that
+buys a leak, not a bypass) and independent of the +0x590 decoupling question,
+because a reach of exactly 1664 is well inside the file cap (R107, their SS44.1).
+It also inverts the grooming goal, which is their own caveat and a real one: we
+now want the victim's LOWER NEIGHBOUR to be the system's C++ object rather than
+one of ours, which is harder to force than owning our own spray.
+
+R109.4  RECIPE V - the vptr probe, armed as job 721, CHECKPOINT PASSED.
+-------------------------------------------------------------------------------
+recipeV1664.dmg, 4,675 B. Single ZLIB run at sectors 0-2, dbr 3,
+compressedLength 3200, delta 1664, tag 0x7E.
+    bytes 0..7    FAKE_VPTR = 0x4A617D0016640000   -> the neighbour's vptr
+    bytes 8..15   marker: tag<<24|1664, and 0x4A61|nibble
+    bytes 16..    the R107.6 tile, dist = 1664 - k
+A virtual call is `ldr x8,[obj] ; ldr x9,[x8,#slot] ; blr x9`, so the FIRST deref
+faults at FAKE_VPTR + slot and far reports it. The low half is zero so far's low
+16 bits ARE the vtable slot offset, and the top 16 bits are deliberately not
+0xFFFF so the value is unmapped by construction and faults at once rather than
+wandering into something plausible.
+
+  far = 0x4a617d0016640000 + small  ->  PC CONTROL PATH CONFIRMED, slot in the
+                                        low bits
+  zone panic, tag 0x7E              ->  neighbour free; expected majority; re-run
+  other fault, tag 0x7E             ->  live non-C++ object; decode it
+  clean boot                        ->  the Recipe Q outcome; re-run
+
+OPEN, and these are their caveats which I am recording rather than softening:
+which instance takes a post-overflow virtual call is boot-timing dependent and
+unproven; the eventual fake-vtable address needs the FAR leak first, so the two
+halves chain rather than stand alone; and placement of a CHOSEN neighbour below V
+has still never been demonstrated on hardware. The by-luck rate for "neighbour is
+a live object at all" is roughly 1 in 5 across six samples.
+
+
+================================================================================
+R110. *** THE VPTR LOTTERY IS STRUCTURALLY NEAR-HOPELESS: V's LOWER NEIGHBOUR
+      HAS BEEN FREE IN 6 OF 7 RECORDS. *** Aim is proven three times over; what
+      is missing is not luck but a free element in a densely-LIVE chunk.
+================================================================================
+
+R110.1  THE TALLY, across every record we have landed.
+-------------------------------------------------------------------------------
+  P s1  slide 0x1a400000  up  6.43 s  watchdogd      DATA ABORT - neighbour LIVE
+                                                     (entitled CD reconstitute)
+  P s2  slide 0x05c00000  up  6.46 s  xpcproxy       zone panic - neighbour FREE
+  R s1  slide 0x19c00000  up 19.88 s  mobileassetd   zone panic - FREE
+  T s1  slide 0x09200000  up  6.21 s  xpcproxy       zone panic - FREE
+  U s1  slide 0x1ba00000  up 29.36 s  sucontrollerd  zone panic - FREE
+  V s1  slide 0x04600000  up 66.18 s  bluetoothd     zone panic - FREE
+  W s1  slide 0x1f000000  up  6.34 s  xpcproxy       zone panic - FREE
+(Q and S booted clean and left no record.)
+*** 1 LIVE, 6 FREE. ***
+
+R110.2  AIM IS PROVEN. THREE TIMES, BYTE FOR BYTE.
+-------------------------------------------------------------------------------
+  Recipe V: found 0x4a617d0016640000 at offset 0 of 1664 - FAKE_VPTR verbatim
+  Recipe W: found 0x4a617e0116640000 at offset 0 of 1664 - the n=1 fake vptr
+  Recipe U: found 0x4a6163714a61d014                     - tile, tag nibble 0xD
+So our byte 0 lands exactly on the element base below V, which for a C++ object
+IS its vptr. The mechanism from their SS48 is sound and our delivery is accurate
+to the byte. That half is finished.
+
+R110.3  *** WHY 6/7 FREE IS STRUCTURAL, NOT UNLUCKY. ***
+-------------------------------------------------------------------------------
+The fifteen vtable classes in [1281,1664] are instantiated during device-tree
+bring-up and are LONG-LIVED. The chunks carved for them therefore fill with live
+objects and their free lists drain. By the time the partition probe allocates our
+victim - 6+ seconds later, after hdik attaches - kalloc.1664 is serving from
+chunks that still HAVE free elements, i.e. later, lightly-used ones. So V lands
+among free neighbours essentially by construction, and a platform object will
+almost never be adjacent.
+
+That also explains the one exception: P s1's neighbour was an entitled cs_blob
+reconstitute buffer, allocated during boot in the same era as our victim rather
+than during platform bring-up.
+
+R110.4  SO SCALING THE LOTTERY IS A WEAK PLAY, AND I AM NOT GOING TO DO IT BLIND.
+-------------------------------------------------------------------------------
+The obvious next move is more fake vptrs per boot - delta 13312 for eight
+elements, delta 33280 for twenty. It is cheap to build. But R110.3 says the
+limiting factor is not how many elements we cover, it is that V is in the WRONG
+CHUNK ENTIRELY: covering 8 or 20 elements of a lightly-used late chunk still
+covers only free elements. Two further problems:
+  - Past V's own chunk the arithmetic breaks. kalloc.1664 elements do not tile
+    pages evenly, so element bases are at V - n*1664 only WITHIN V's chunk;
+    across a chunk boundary the alignment shifts by that chunk's own carve and
+    slack, and our n*1664 guesses land mid-element.
+  - More corrupted cookies make the zone check fire sooner, though the W record
+    argues the race is not the binding problem: W panicked at 6.3 s in xpcproxy,
+    i.e. when userspace starts, whereas IODARTMapper's DMA-mapping virtual calls
+    happen well under a second. If a platform object had been in range we would
+    have seen the vptr deref FIRST. The race is fine; the range is wrong.
+
+R110.5  WHAT WOULD ACTUALLY WORK: a free element in a densely-LIVE chunk.
+-------------------------------------------------------------------------------
+V pops whatever the free list hands it. To get live platform neighbours, V must
+be allocated from an EARLY chunk that is full of live objects - which requires
+something to FREE an element in such a chunk shortly before the probe runs, so
+that element becomes the free-list head and V inherits its position.
+
+The app-session already identified a candidate in their SS43 and may not have
+noticed its significance here: *** the resource-fork plist is an
+author-controlled in-window alloc+free primitive. *** The XML plist in our own
+image is parsed during attach, before the partition probe, and its buffer sizes
+are OURS to choose. An allocation sized into [1281,1664] that is then freed
+returns a kalloc.1664 element to the free list head - and V, allocated next,
+pops exactly that element.
+
+That does not solve placement by itself: we still do not choose WHERE the plist
+buffer lands. But it is the only mechanism on the board that lets us inject an
+alloc+free into the window at a time of our choosing, and the question "can the
+plist buffer be made to land in an early chunk" is answerable offline, where the
+zone's chunk-selection logic lives (0xfffffff0076d02e4, the alloc_size selector,
+and zcram's carve).
+
+RECOMMENDATION, recorded against the temptation to keep spending boots: PAUSE the
+vptr lottery. Aim is proven, the mechanism is sound, and the blocker is placement
+- which is offline work. Spending boots on wider sweeps tests a hypothesis
+(R110.3) that already has 7 samples against it.
+
+
+================================================================================
+R111. *** kslide MEASURED: ~8 BITS, NOT FIXED. *** Their SS58.2 hardware ask,
+      answered from the eight paniclogs we already hold - and the loop makes the
+      brute-force amortisable WITHIN a boot, not across boots.
+================================================================================
+
+R111.1  THE MEASUREMENT.
+-------------------------------------------------------------------------------
+Their SS58.1 establishes kslide as the single gate on BOTH endgames, and SS58.2's
+decision tree asks for a hardware read of its entropy. Every paniclog prints
+"Kernel slide:", so we have eight independent stock-boot samples already:
+
+  panic-702-recipeO   0x02c00000   text base 0xfffffff009c04000   k =  22
+  panic-705-recipeP   0x1a400000   text base 0xfffffff021404000   k = 210
+  panic-P-run2        0x05c00000   text base 0xfffffff00cc04000   k =  46
+  panic-R-run1        0x19c00000   text base 0xfffffff020c04000   k = 206
+  panic-T-run1        0x09200000   text base 0xfffffff010204000   k =  73
+  panic-U-run1        0x1ba00000   text base 0xfffffff022a04000   k = 221
+  panic-V-run1        0x04600000   text base 0xfffffff00b604000   k =  35
+  panic-W-run1        0x1f000000   text base 0xfffffff026004000   k = 248
+      (k = slide / 0x200000)
+
+  8 samples, 8 DISTINCT values -> NOT FIXED. Branch 1 of SS58.2 is closed.
+  Every slide is an exact multiple of 0x200000 (2 MB) - the granularity.
+  k observed in [22, 248]. max k = 248 implies a space of at least 249, so the
+  natural size is 256 = *** 8 BITS ***.
+  Eight draws with no collision: P(no collision) is 0.90 for M=256, 0.80 for
+  M=128, 0.63 for M=64, 0.39 for M=32. So the data is comfortable with 128-256
+  and mildly disfavours 64 or less. I will not claim better resolution than that
+  from eight samples - it is a bound, not a distribution fit.
+
+So: SS58.2 branch 2, LOW ENTROPY. Their tree says "reboot-brute-force kslide,
+chain closes (untether tolerates retries)."
+
+R111.2  BUT ~128 REBOOTS IS NOT AN UNTETHER. THE LOOP FIXES THAT.
+-------------------------------------------------------------------------------
+At 256 possibilities, blind reboot-retry averages 128 boots. At ~20-30 s per
+attempt that is roughly an hour before the device comes up, every time it is
+powered on. That is not a usable untether, so "low entropy, therefore fine" is
+too quick.
+
+What changes it is something we established on hardware and their SS58 does not
+yet fold in: *** ONE READ REQUEST GIVES N INDEPENDENT WRITES PER BOOT. ***
+  - R98: the read loop iterates across zlib runs (proven in silicon).
+  - R99.1: there is NO iteration cap - zero add/sub-by-1 in the function and none
+    of its 47 compares tests an iteration count. The only bound is the remaining
+    sector count, which is ours via nEnt * eSz.
+  - Each run carries its OWN compressedLength, hence its own delta, hence its own
+    target address AND its own content.
+Therefore a kslide brute-force can be amortised WITHIN a boot: N runs = N guesses,
+and 256/N boots instead of ~128. With a few dozen runs it is one or two boots,
+which is an untether rather than an endurance test.
+
+THE PRECONDITION, and it is theirs: R104 showed a multi-run sequence ABORTS after
+run 1, because run 1's write smashes the free-list cookies of the free elements
+below V and the zone check fires on the next kalloc.1664 allocation. R104.3
+established the fix - a LIVE element has no cookie to validate, so corrupting it
+trips nothing. Which is exactly their SS38 "own the chunk" grooming at m >= 11 of
+17. So:
+
+    their SS38 grooming  ->  multi-run survives (R104.3)
+                         ->  N guesses per boot (R98, R99.1)
+                         ->  8-bit kslide brute-forced in 1-2 boots (R111.1)
+
+That is the first statement of the chain in which the grooming work is not merely
+helpful but *quantitatively* load-bearing, and it is a third independent reason
+for it after placement (R102.5) and sequence survival (R104.3).
+
+R111.3  CONVERGENCE: their SS57.1 and our R110 reached the same conclusion
+        independently, from opposite directions.
+-------------------------------------------------------------------------------
+Their SS57 reasoned from object sizes that every in-window occupant we can author
+is a RAW BUFFER (OSData/OSString objects are 40/24 bytes, in kalloc.48/32; only
+their backing stores land in 1664), so the vtable path needs the HARD inverted
+aim - a foreign C++ object we did not place - while the forge path accepts a raw
+neighbour and keeps the easy aim.
+Our R110 reasoned from seven hardware records that V's lower neighbour is FREE in
+6 of 7, because the fifteen vtable classes are allocated during device-tree
+bring-up and their chunks drain, so the probe's victim is served from later,
+lightly-used chunks.
+Same conclusion, two independent routes, one offline and one in silicon. Their
+SS57.2 correction of their own SS49/SS50 enthusiasm ("not clearly better; a
+different trade") is the right reading, and our hardware supports it.
+Net: the FORGE path is the more deterministic lead. R110.4's recommendation to
+pause the vptr lottery stands and is now doubly justified.
+
+
+================================================================================
+R112. *** RETRACTION: RECIPE P COULD NEVER HAVE REACHED RUN 2, SO THE NVRAM
+      SPRAY BOOT TESTED NOTHING. *** The continue-gate requires each poisoned
+      run to DECOMPRESS CLEANLY, and P's runs carried raw tile bytes.
+================================================================================
+
+R112.1  WHAT I REPORTED, AND WHY IT WAS WRONG.
+-------------------------------------------------------------------------------
+Job 728's paniclog decoded to run 1's tag only:
+
+  expected 0x4a61001070000010  -> tag 0x70, RUN 1, word2/word3, dist 16
+  found    0x30684a616371      -> tag 0x70, RUN 1, word1, dist 1664
+  element  0xfffffff001451a00  -> V = 0xfffffff001452080
+  slide 0x14000000, uptime 6.22 s, pid xpcproxy
+
+My script printed "only run 1 (0x70) -> sequence still aborted at run 1; spray
+did not land adjacent." The first clause is an observation. The second is an
+INFERENCE and it is unsupported: it reads the absence of runs 2-8 as evidence
+about V's neighbours, when the sequence could not have continued for a reason
+that has nothing to do with neighbours.
+
+R112.2  THE GATE, which I had already documented myself.
+-------------------------------------------------------------------------------
+read()'s loop back-edge at 0xdcb5f4 (cbnz x22) is reached only through the
+status gate:
+
+  0xdcb5d4  cmp  w8, #0x3b
+  0xdcb5ec  tst  x9, x10          x10 = 0x00020001
+  0xdcb5f4  cbnz x22, 0xdcb434
+
+so the loop continues only when (1 << w8) has a bit in 0x00020001, i.e. when
+w8 is in {0, 0x11}. The run must SUCCEED.
+
+And the order of operations inside one pass is:
+
+  0xdcb6a0  blr [provider_vt+0x590]     <- THE OVERFLOW WRITE
+  0xdcb6bc  bl  0xfffffff007dcdd08      <- THE INFLATE
+  0xdcb718  bl  0xfffffff007b7be48      <- IOFree (dominates all exits)
+  0xdcb730  b   0xdcb5a4                <- status latch
+
+The write lands BEFORE the inflate. So a poisoned run gets its write for free,
+but it only buys the NEXT run if its stream then decompresses cleanly.
+
+Recipe P's eight runs carried raw tile bytes - a repeating 32-bit ruler, not a
+zlib stream. Run 1 wrote (and the paniclog proves it did: tag 0x70 landed at
+both dist 1664 and dist 16), then the inflate failed, w8 fell outside
+{0, 0x11}, and the loop ended. *** This would have happened with any set of
+neighbours whatsoever. *** Recipe P was not a banded sweep; it was an expensive
+single-run recipe carrying seven runs of dead weight.
+
+R112.3  CONSEQUENCE: THE GROOMING IS STILL UNTESTED ON HARDWARE.
+-------------------------------------------------------------------------------
+nvspray.sh planted all sixteen nfg00..nfg15 variables (1664 B each, readback
+confirmed), the pod then cold-booted Recipe P, and it crashed at 6.22 s. I
+recorded that as "spray did not land adjacent." It is not a result at all:
+
+  - if the spray landed perfectly, we would see this paniclog;
+  - if the spray landed nowhere near V, we would see this paniclog.
+
+The boot distinguishes nothing. Their SS37.5 groom and our placement question
+(R102.5, R110.3) have had ZERO hardware tests - not one failed test. The seven
+records in R110 showing V's lower neighbour FREE in 6 of 7 are all from
+UNGROOMED boots; they stand as a baseline and say nothing about whether the
+groom changes it.
+
+R112.4  THE PROCESS FAILURE, stated plainly because it is the most expensive
+        of its family so far.
+-------------------------------------------------------------------------------
+I documented this exact gate in R97.9(c):
+
+  "the loop continues only when the status code's bit lands in mask 0x20001...
+   Had run A's zlib stream been malformed, the status gate - not the sector
+   count - would have ended the loop"
+
+and then designed the banded sweep against it anyway, built it, armed it, spent
+a cold boot and a DFU cycle of the author's time on it, and mis-reported the result.
+The app-session found the gate independently and told us.
+
+The pattern is specific and worth naming: I wrote the constraint down as prose
+in a findings entry, and the builder had no mechanical check for it. Every other
+constant in the recipe builders IS asserted - R107's tile identity, R109's
+discriminator shift, the post-job-712 rule that gate constants be derived from
+the built file. The zlib validity of each run was the one invariant left to
+memory, and memory is exactly what failed.
+
+RULE (also added to JOB-PREFLIGHT): every run in a multi-run recipe must be
+produced by make_stream(), which asserts both its exact length and its
+round-trip, and the builder must refuse to emit a recipe containing any run it
+did not build that way. A constraint recorded only in prose is not a constraint.
+
+
+================================================================================
+R113. *** zstream.py v2: EXACT-LENGTH VALID ZLIB AT ANY REACH. *** The v1
+      failures at delta=1024 and delta=1664 were ONE cause, not two, and it was
+      not the search bounds.
+================================================================================
+
+R113.1  THE REQUIREMENT (from R112.2).
+-------------------------------------------------------------------------------
+Each run needs all three of:
+
+  compressedLength == delta + sectorCount*512      exactly (it IS the reach)
+  a stream of exactly that many bytes
+  a clean inflate to exactly sectorCount*512 bytes
+
+Reach and output size must be INDEPENDENT, because the reach has to be ~1664 to
+touch the element below V while the output is capped at allocSize (1536 at
+dbr=3) by the check at 0xdcb618. Padding therefore has to come from DEFLATE
+blocks that emit no output:
+
+  empty stored block         3 bits + align + LEN/NLEN(4)       -> 5 B aligned
+  empty fixed-Huffman block  3 bits + EOB(sym 256, 7 zero bits) -> 10 bits
+
+R113.2  WHY v1 FAILED - the length algebra.
+-------------------------------------------------------------------------------
+v1 bunched all the fixed blocks at the front. Reachable lengths were then
+
+  total = 6 + len(payload) + SUM_i g(f_i),    g(f) = ceil((10f+3)/8) + 4
+
+where f_i is the number of fixed blocks before stored block i, and the 6 is the
+zlib wrapper (2 B header + 4 B adler32). g(f) for f = 0..7 is
+
+  5, 6, 7, 9, 10, 11, 12, 14        -> mod 5:  0, 1, 2, 4, 0, 1, 2, 4
+
+A single term is NEVER 3 mod 5 - ceil() skips cost 4, 9, 14, 19 exactly - and
+with every f_i = 0 the sum is pinned to 0 mod 5. The reachability condition
+collapses to
+
+  reachable  <=>  (delta - 10) mod 5 in {0,1,2,3}
+  BLOCKED    <=>  delta mod 5 == 4
+
+len(payload) CANCELS. 1024 mod 5 == 4 and 1664 mod 5 == 4: one cause, both
+failures. No amount of widening the ns/nf loops - and no change of sectorCount
+- could ever have found them. My first instinct, "the padding search isn't
+reaching those lengths," was wrong in the way that matters: those lengths were
+not in the reachable set at all.
+
+R113.3  THE FIX: interleave.
+-------------------------------------------------------------------------------
+Allow fixed blocks before EACH stored block instead of all at the front. Each
+stored block then contributes g(f) independently, so per-block increments over
+the 5-byte baseline of
+
+  +1 (f=1)    +2 (f=2)    +4 (f=3)
+
+become available. Residue 3 is built as 1+2, residue 4 as 4. _plan(T) picks the
+adjusters from T mod 5 and lets the block count m absorb the rest, so it is
+complete by construction for every T >= 5.
+
+For delta=1664, payload=1536: T = 3200 - 6 - 1536 = 1658; 1658 mod 5 == 3, so
+one f=1 block and one f=2 block, m = (1658-3)/5 = 331 stored blocks.
+6 + 1536 + 5*331 + 3 = 3200. Exactly.
+
+R113.4  COVERAGE, measured rather than asserted.
+-------------------------------------------------------------------------------
+  10/10 delta targets now hit exactly (512, 1024, 1536, 1636, 1664, 2048, 3328,
+  4096, 4992, 8192), all round-tripping.
+
+  Brute sweep, delta = 1..8192 at payload 1536: 11 unreachable, and they are
+  delta <= 10 (below the 11 + len(payload) floor) plus delta = 14, where T = 8
+  falls in the one real gap between one block (max g = 9) and two (min 10). Of
+  those 11, only 3 are delta % 5 == 4 - the v1 residue class is GONE, not merely
+  thinned. Every delta >= 15 is reachable; the useful range starts near 1600.
+
+  300 random (delta, sectorCount, payload) triples with NON-ZERO random
+  payloads: 0 failures on exact length, 0 on round-trip. The construction is
+  payload-content independent, as it must be, since the padding carries no data.
+
+R113.5  WHAT THIS UNBLOCKS.
+-------------------------------------------------------------------------------
+The first recipe that can actually survive past run 1 is now buildable, so:
+
+  - R104.3's multi-run survival claim becomes testable in silicon for the first
+    time (Recipe O proved ITERATION, but with only one poisoned run);
+  - the grooming question R112.3 says is untested can finally be tested;
+  - R98/R99.1's "N guesses per boot" stops being arithmetic and becomes a
+    measurement;
+  - delta=1664 - the reach that puts byte 0 on the lower element's base, its
+    vptr if it is a C++ object - is available for the first time.
+
+v1 is kept at route2/zstream.py.bak-v1 so the algebra above can be re-checked
+against the code that failed.
+
+
+================================================================================
+R114. *** RECIPE X ARMED: the first recipe whose every run is valid zlib. ***
+      Plus two corrections to R113 made within the hour of writing it, and one
+      unexpected hardware fact: THE NVRAM GROOM VARIABLES WERE ALREADY GONE.
+================================================================================
+
+R114.1  CORRECTION TO R113.5: the written bytes are the COMPRESSED STREAM, so
+        the payload must sit at the FRONT, and delta=1664 does NOT reach the
+        vptr.
+-------------------------------------------------------------------------------
+R113.5 claimed that fixing zstream.py "unblocks delta=1664, the reach that puts
+byte 0 on the lower element's base". That is wrong, and the error is in the
+layout, not the length algebra.
+
+The provider read at 0xdcb6a0 copies compressedLength FILE bytes into
+dst = bufEnd - L. So the bytes that land in memory are the RAW STREAM BYTES, not
+the decompressed output:
+
+    stream byte k  ->  V - delta + k
+
+Hardware proof, already in this log: Recipe V put FAKE_VPTR at FILE bytes 0..7
+and the panic reported "found 0x4a617d0016640000 ... at offset 0 of 1664"
+(R109). Recipe W the same with its n=1 value. So the controlled region is the
+FIRST delta bytes of the stream.
+
+zstream v2 put the payload at the END of the stream, after the padding - which
+lands INSIDE the victim, the buffer that is IOFree'd on every pass. It would
+have written our content into the one region that does not matter, and the
+padding into the neighbour. v2 was correct about length and validity and
+backwards about the only thing the recipe is for.
+
+v3 inverts it: content first, padding after.
+
+    [78 01][hdr][LEN/NLEN][  content  ][empty stored blocks...][adler32]
+     <---- FRONT = 7 ---->  ^ lands at V - delta + 7
+
+And that exposes the second half of the correction. A valid zlib stream has
+SEVEN structural bytes at the front that we do not control: 78 01, the stored
+block header, and LEN/NLEN. At delta=1664 those seven bytes cover the element
+base, so the vptr slot is NOT ours. To put CONTENT byte 0 on the element base:
+
+    *** delta = 1664 + 7 = 1671, NOT 1664. ***
+
+Then element offsets 0..1535 are ours and 1536..1663 take padding bytes
+(00 00 00 FF FF repeating). This is the price of validity, and it is cheap: the
+raw-byte recipes (V, W) controlled offset 0 at delta=1664 but could never
+advance past run 1.
+
+R114.2  CORRECTION: THE REACH IS MEASURED AGAINST allocSize, NOT AGAINST THE
+        RUN'S OUTPUT SIZE. Caught by udif.describe(), not by me.
+-------------------------------------------------------------------------------
+read() computes bufEnd = buf + allocSize, with allocSize = dbr << 9 taken from
+the MISH TABLE (0xdcb60c-614: [[x24+0xb0]+0x20] << 9). It does not come from the
+run's sectorCount. Therefore
+
+    dst = V + allocSize - L        and        reach = L - allocSize
+
+My run_for_depth() used L = out_len + reach. For a 3-sector run at dbr=3,
+out_len == allocSize == 1536 and the two agree, which is why the four main runs
+were right. For the 1-sector alternate run they differ by 1024, and the alt run
+was aimed at V-647 instead of V-1671.
+
+What caught it: udif.describe() prints `dst = V-<L-1536>` per run, and it printed
+V-647 for the alt run while I was expecting V-1671. The tool was right and my
+arithmetic was wrong. Fixed in zstream.run_for_depth(), which now takes alloc
+explicitly and rejects sectorCount*512 > allocSize (which read() would reject at
+0xdcb618 anyway).
+
+R114.3  RECIPE X: four runs, every one valid zlib, all at the same depth.
+-------------------------------------------------------------------------------
+    recipeX1664.dmg, 26062 B
+    dbr 3 -> allocSize 1536 -> kalloc.1664
+    PLBA 64, nEnt 48 x eSz 128 = 6144 B = 12 sectors -> READ #2 spans all four
+    4 runs at sectors 64/67/70/73, 3 sectors each, L = 3207, reach = 1671
+    alt run at sector 8191, 1 sector, L = 3207, reach = 1671, tag 0x88
+    tags 0x80..0x83; FAKE_VPTR = 0x4A618000_06870000 | (n << 32)
+
+It asks ONE question: does a multi-run read advance past run 1? All four runs
+write the SAME depth on purpose. The victim is IOMalloc'd and IOFree'd every
+pass and kalloc.1664 is non-caching (R97.5/R97.8), so the LIFO hands each pass
+the same V; four runs therefore LAYER, and whatever is finally in the lower
+element came from the LAST run that executed.
+
+The repair of R112's confound is that the run index rides in BOTH the fake vptr
+(bits 32-39) and every tile word w2 (bits 20-22), so the run count is readable
+from the panic WHATEVER KIND of panic it is - independently of what the
+neighbour turned out to be. Recipe P conflated those two reads; these are now
+separate.
+
+NVRAM deliberately UNGROOMED for this boot. A successful groom could produce a
+CLEAN boot - no paniclog, hence no run index - which would answer the placement
+question while destroying the survival one. R110's seven records (lower
+neighbour free in 6 of 7) are the reliable reporter, and they are all ungroomed.
+Survival first; the groom gets its own boot.
+
+R114.4  INDEPENDENT VERIFICATION of the image, from the raw bytes.
+-------------------------------------------------------------------------------
+A separate agent wrote its own UDIF/DEFLATE parsers from the spec (python3 -I,
+no builder code read or imported) and checked 13 claims. All 13 hold:
+
+  * one blkx, sectorCount 8192, buffersNeeded 3 -> ALLOC 1536
+  * 8 non-terminator runs tile [0, 8192) exactly: no gaps, no overlaps
+  * 5 zlib runs at (64,3)(67,3)(70,3)(73,3)(8191,1)
+  * *** every run is VALID ZLIB: decompressobj succeeded, unused_data == b"",
+    eof is True, on all five. This is the invariant Recipe P lacked. ***
+  * every run inflates to exactly sectorCount*512 (1536 x4, 512 x1)
+  * compressedLength - ALLOC == 1671 for all five
+  * the qword at stream offset 7 is the fake vptr, n = {0,1,2,3} and 7
+  * the 7 structural bytes are 78 01 00 00 06 ff f9 (LEN 1536, NLEN 0xF9FF)
+  * *** 411 tile groups checked, EVERY one, no sampling: zero mismatches ***
+  * MBR/GPT valid, header CRC self-consistent (0x94B6BBB6), PLBA 64,
+    48 x 128 = 6144 = sectors 64..75 = exactly the four runs' span
+
+It re-derived the placement arithmetic independently and got dst = V - 1671,
+stream byte 7 at V - 1664, content covering [V-1664, V-128), and the remaining
+128 bytes of the element covered by empty-stored-block headers. That matches
+R114.1/R114.2 exactly.
+
+The image was rewritten twice during that verification and two of the three
+versions are both 26062 bytes, so size could not distinguish them. Pinned by
+hash instead: sha256 605e74ae...e18fc6c4, confirmed by the verifier against the
+bytes it actually parsed, with Birth == mtime and its own pre-parse directory
+listing showing the final timestamp. The arming script's size gate is checked
+against that same hash before queueing.
+
+R114.5  A REAL DEFECT IN THE RULER: SIZE_BASE OVERLAPS THE RUN FIELD IN w1.
+-------------------------------------------------------------------------------
+Found by the verifier, not by me. w1 = SIZE_BASE | ((n&7) << 10) | ((o>>4) &
+0x3FF) with SIZE_BASE = 0x3000. 0x3000 sets bits 12 and 13; (n&7)<<10 occupies
+bits 10-12. Bit 12 is SHARED, so n's top bit is swallowed and k == k|4:
+
+    n = 0 or 4 -> 0x3000      n = 2 or 6 -> 0x3800
+    n = 1 or 5 -> 0x3400      n = 3 or 7 -> 0x3C00
+
+Over the realized set n in {0,1,2,3,7} the only ambiguity is (3,7) - run 3
+versus the alternate run - and it hits all 31 of the alt run's groups.
+
+Treated as a KNOWN LIMITATION rather than rebuilt, because the disambiguation is
+redundant and the other two carriers are clean, structurally and not merely
+empirically:
+  * w2 = (tag<<24) | ((n&7)<<20) | o is INJECTIVE on (tag, n, o) for all
+    o < 2^20: tag in bits 24-31, n in bits 20-22, o in bits 0-10, bits 11-19
+    and 23 always zero. 411 distinct values over 411 groups.
+  * the fake vptr is injective in n until n reaches 0x8000.
+Rebuilding would have cost a fresh verification cycle for no measurement gain.
+SIZE_BASE must not overlap bits 10-12 in the NEXT recipe.
+
+*** AND A SHARPER POINT, which I had not asked about: w0 and w3 carry NO run
+identity at all. *** w0 is the constant 0x4A616371; w3 = 0x4A610000 | (o &
+0xFFFF) depends only on the offset. Both are ambiguous across all five runs. So
+when reading the panic:
+
+    recovered value contains w2, or the vptr  -> run identified uniquely
+    only {w1}, or {w0,w1}, or {w1,w3}         -> ambiguous for (3,7)
+    only {w0}, {w3}, or {w0,w3}               -> ambiguous across ALL runs
+
+This matters for the decode. The zone-cookie check prints a qword; at element
+offset 0 that qword IS the fake vptr, so the usual print site identifies the run.
+But a print at some other offset can land on (w0,w1) or (w2,w3), and only the
+latter is unambiguous. *** The verdict script must say "AMBIGUOUS" in those cases
+rather than picking a run. *** R112 happened because a script reported an
+inference as an observation; the same discipline applies here.
+
+R114.6  *** UNEXPECTED: THE SIXTEEN NVRAM GROOM VARIABLES WERE ALREADY GONE. ***
+-------------------------------------------------------------------------------
+nvclean.sh counted before deleting, and found:
+
+    === 1. present groom variables (names only) ===
+      nfg* present   : 0 (expect 16)
+    variable count : 10 (was 10)
+
+All ten baseline variables intact, zero nfg* present. nvspray.sh had planted all
+sixteen and confirmed them by readback (len 4993 = 1664*3 + 1) in the same
+ramdisk session. Between then and now the pod cold-booted Recipe P, crashed, lost
+power, re-entered DFU, and booted the ramdisk three times (jobs 726-728).
+
+*** So the Recipe P spray boot was void TWICE OVER: the recipe could not reach
+run 2 (R112), AND the groom may not have been present at all. ***
+
+I cannot say WHEN they vanished, and I am not going to guess. The candidates are
+distinguishable by one cheap experiment:
+  (a) ramdisk NVRAM writes never reach NOR, so they were gone before the Recipe
+      P boot even started;
+  (b) they reached NOR but did not survive the power pull;
+  (c) iBoot or the OS prunes unknown variables at some point in the boot.
+TEST: plant ONE variable from the ramdisk, cold boot, re-enter the ramdisk, and
+count. One boot, and it decides whether the NVRAM groom is a usable mechanism at
+all. This gates their SS37/SS63/SS64 groom work, so it goes to them immediately.
+
+Note what this does NOT overturn: R110's seven records of V's lower neighbour are
+all from ungroomed boots and never depended on the spray. The baseline stands.
+
+R114.7  THE SCRIPT REPORTED "deleted=yes" SIXTEEN TIMES FOR VARIABLES THAT WERE
+        NEVER THERE.
+-------------------------------------------------------------------------------
+nvclean.sh's per-variable check was
+
+    STILL=$(nvram -p | grep -ac "^nfg$i	") ; [ "$STILL" = 0 ] && echo yes
+
+which is true whether the variable was deleted or was never present. Sixteen
+lines of "deleted=yes" are, on this run, sixteen pieces of non-evidence. The only
+thing that caught the real state was the COUNT printed before the loop.
+
+This is the same family as the five already logged (grep declining binary input,
+the R97.4 back-edge scan, the bare except, the /dev/disk4 write silently
+discarded, R101.5's loose hex pattern): a check that cannot distinguish success
+from vacuity, reporting success. RULE: a deletion check must assert the variable
+was PRESENT first, or report "absent" as a third outcome distinct from "deleted".
+
+R114.8  THREE BUILDER BUGS IN ONE SITTING, AND WHAT CAUGHT EACH.
+-------------------------------------------------------------------------------
+Recorded because the pattern is more useful than the bugs:
+
+  1. tile phase. The tile started at content offset 8, so its 16-byte groups sat
+     at offsets congruent to 8 mod 16, and a readback at ALLOC-16 (16-aligned)
+     read a w2 as a w0. Caught by my own assertion. Fixed by 16-ALIGNING the
+     tile (content 0..7 vptr, 8..15 a self-locating head qword, 16.. the tile,
+     1520 = 95 whole groups) rather than by moving the probe.
+  2. variable shadowing. The new R112 assertion loop did `out = zlib.decompress
+     (blob)`, overwriting the OUTPUT PATH with run data. parse() then took its
+     bytes branch and read a fake_vptr as the koly trailer, producing
+     "no koly trailer, got b'\x00\x00\x87\x06'" - which looks exactly like file
+     corruption. I formed a flush/visibility hypothesis about the connected
+     folder, tested it, and it was WRONG; the file was never corrupt. What found
+     it was instrumenting the actual value (ValueError: embedded null byte), not
+     reasoning about it. The assertion added to enforce R112 introduced the bug.
+  3. reach vs allocSize (R114.2), caught by udif.describe().
+
+Two of the three were caught by instruments rather than by thought, and the one
+I reasoned about I got wrong twice before measuring. The lesson is not "be more
+careful"; it is that the assertions and the describe() output are doing real work
+and must stay loud.
+
+R114.9  THE DECODER WAS PROVEN ON HELD PANICS BEFORE THE BOOT, AND THAT FOUND
+        THREE DEFECTS IN IT.
+-------------------------------------------------------------------------------
+route2/decodeX.py decodes a raw paniclog off-pod. Per the meta-rule (an
+instrument not proven in this session produces no information) it was run
+against all eight paniclogs we already hold BEFORE the Recipe X boot. That found
+three defects, all of which would have produced a confident wrong answer:
+
+  1. LOOSE PATTERN, the R101.5 failure again. The w3 test checked only the high
+     16 bits, so Recipe V's fake vptr 0x4A617D0016640000 was reported as
+     "w3 offset marker, element offset 32000". A tile offset is <= 1664 and
+     16-aligned; the test is now range-anchored, and prior-recipe vptrs
+     (tag 0x5A..0x7F) are recognised and reported as STALE.
+  2. DEAD TEST, the R97.4 failure again. The w1 test was
+     `(half & 0xFFFFC000) == 0x3000`, which is UNSATISFIABLE: 0x3000 occupies
+     bits 12-13, which that mask clears. w1 detection silently matched nothing.
+     All of w1 lives in bits 0..13, so the test is now
+     `(half >> 14) == 0 and (half & 0x3000) == 0x3000`. It now correctly reads
+     the P-spray value 0x3068 as group offset 1664, matching R112's decode.
+  3. OVERCLAIMING. The verdict said "Recipe X bytes present" for Recipe P's
+     paniclog. w0 (MAGIC), w1 (SIZE_BASE 0x3000) and w3 (0x4A610000|o) use
+     byte-identical formulas in mkrecipeP.py. *** They cannot establish which
+     RECIPE wrote the bytes, never mind which run. *** Only w2 (tags moved to
+     0x80+) and the fake vptr distinguish Recipe X at all. Fixed: only those two
+     can assert Recipe X.
+
+Regression after the fixes: all eight held paniclogs, zero false positives - none
+reads as a Recipe X run, which is correct since all eight predate it. Positive
+controls synthesised and confirmed: vptr for runs 0/3/7 identified; a (w3,w2)
+qword yields run 3 from w2 while w3 is flagged non-identifying; and
+far = vptr + 0x590 is reported as a virtual call taken on our bytes.
+
+The decoder refuses to name a run when only w0/w1/w3 are recoverable, and says
+AMBIGUOUS with the candidate set instead. R112 happened because a script printed
+an inference as an observation; this one is built not to.
+
+
+================================================================================
+R115. *** RECIPE X FLEW: the richest hit of the project - a LIVE code-signing
+      blob, the CD geometry confirmed from registers, both CD gates passed on
+      our own bytes - AND the sequence still stopped at run 1 with every run a
+      valid zlib stream. The status gate was not the only obstacle. ***
+================================================================================
+
+Job 729 armed, job 730 pulled the log. Crash before the boot chime. Slide
+0x6200000, distinct from all nine priors, so the record is FRESH (R111).
+
+R115.1  NOT A ZONE PANIC - A DATA ABORT IN THE CODE-SIGNING PATH.
+-------------------------------------------------------------------------------
+    panic: Kernel data abort. at pc 0xfffffff00dc7fb84, lr 0xfffffff00d9095b0
+    esr 0x96000006   EC=0x25 data abort same EL, DFSC=0x6 translation fault L2,
+                     WnR=0 -> a READ
+    far 0xfffffff0a0add19c          pid 45: watchdogd, mach_absolute_time 0x8a04c48
+
+    pc - slide = 0xfffffff007a7fb84 = `ldr w4,[x17]`
+                 *** THE SCATTER-WALK LOAD, ubc_subr.c ***
+
+That is the exact instruction identified in the code-signing analysis
+(0xa7fb7c add x17,x12,w16,uxtw ; 0xa7fb84 ldr w4,[x17]). The leak channel of
+R105 fired in silicon, in the form predicted.
+
+Registers that matter:
+
+    x10 0xfffffff060add100   blob start  <- THE ELEMENT BELOW V
+    x12 0xfffffff060add11c   CD base
+    x9  0xfffffff060add6e4   blob end
+    x11 0x5e4 = 1508         blob length
+    x16 0x40000080           w16 = scatterOffset, read BIG-endian
+    x8  0x4a610030           our w3, o=48, read natively
+    x14 0x30000080           BE read at element offset 56
+
+R115.2  EVERY NUMBER CHECKS, AND THE GEOMETRY IS NOW DIRECT RATHER THAN FITTED.
+-------------------------------------------------------------------------------
+  * FAR arithmetic: x12 + w16 = 0xfffffff060add11c + 0x40000080
+                             = 0xfffffff0a0add19c = far, EXACT.
+  * *** x12 - x10 = 0x1c = 28. CD AT ELEMENT+0x1c, CONFIRMED FROM REGISTERS. ***
+    Third independent confirmation, and the first that does not rest on an
+    arithmetic fit - both pointers are in the dump. This is the claim R105.3 got
+    right for the wrong reason (I called a coincidence fit "the proof", retracted
+    in R108.2 after their SS47 parsed real signatures). It is now simply measured.
+  * x9 - x10 = 0x5e4 = x11: a 1508-byte blob in a 1664-byte element. So the lower
+    neighbour was a *** LIVE csb_mem_kaddr BUFFER ***, not free. A NEW neighbour
+    class: R110's seven records were free in 6 of 7, and R110.4 recommended
+    pausing the vptr lottery on that basis. The forge target is reachable.
+  * V = element + 1664 = *** 0xfffffff060add780 ***.
+
+R115.3  *** BOTH CD GATES PASSED ON OUR OWN BYTES. ***
+-------------------------------------------------------------------------------
+The faulting function's only gate is length >= scatterOffset, both fields ours.
+Read big-endian out of our tile:
+
+    CD+0x04 length  = element offset 32 = our w0 = MAGIC 0x4a616371
+                      -> BE 0x7163614a = 1902338378
+    CD+0x2c scatter = element offset 72 = our w2  -> BE 0x40000080 = 1073741952
+    gate: 1902338378 >= 1073741952  -> PASSES
+    CD+0x08 version = element offset 36 = our w1 0x00003002
+                      -> BE 0x02300000, >>8 = 0x23000 >= 0x201 -> PASSES
+
+So the smalloc magic, byte-swapped, happens to be a large enough "length" to
+admit an enormous scatterOffset. The kernel validated our forgery against itself
+and walked into the load. This is the forge path working - not by design, by the
+accident of what the tile contains.
+
+R115.4  *** AND THE SEQUENCE STILL STOPPED AT RUN 1. ***
+-------------------------------------------------------------------------------
+All four runs write the same depth, so under a stable V the last run to execute
+wins everywhere. Decoding w2(n, o) = ((0x80+n)<<24) | ((n&7)<<20) | o, stored LE
+and read BE at element offset 72:
+
+    run 0 -> 0x40000080   <<< OBSERVED
+    run 1 -> 0x40001081
+    run 2 -> 0x40002082
+    run 3 -> 0x40003083
+
+x14 (element offset 56, w2 of group 48) and x8 (w3 at o=48, read natively) agree
+independently. Three fields, one answer: RUN 0.
+
+Prediction P2's bad branch fired. Recording it as the finding it is rather than
+explaining it away, per the instruction I wrote into the arming script.
+
+*** But the result is NARROWER and more useful than "multi-run does not work",
+because Recipe O already proved the loop DOES continue past run 1 - O ran a
+BENIGN run 1 (sectors 64-66) and a POISONED run 2 (67-69), and it HIT (R98). ***
+The untested case was a POISONED run 1, and that is exactly what X tested. So:
+
+    ITERATION past a benign run      : PROVEN (Recipe O)
+    ITERATION past a POISONED run    : *** NOT OBSERVED (Recipe X) ***
+
+The status gate (their SS62) is correct but is NOT the explanation here - our
+streams are valid zlib, verified independently on the bytes on disk. Something
+about the OVERSIZED WRITE ITSELF ends the sequence. Three candidate mechanisms,
+all offline-answerable and sent to them as R115's ask:
+  (a) the provider call at +0x590 returns non-zero when the destination range
+      lies outside the allocation, even though the bytes land. R97/Recipes S+T
+      already showed the callee validates the range before touching the
+      destination; if that validation also sets a status, that is the answer.
+  (b) w26 (which their SS62 says must be 0 for w8 == 0) is set non-zero by an
+      oversized read.
+  (c) the consumed-sector arithmetic (0xdcb4f0 csel, 0xdcb5a8 sub x22,x22,x9)
+      depends on compressedLength, driving x22 to 0 - in which case the loop ends
+      on the SECTOR count and the status gate is a red herring.
+
+R115.5  THE ALTERNATIVE I CANNOT EXCLUDE, STATED PLAINLY.
+-------------------------------------------------------------------------------
+Run-0-only is ALSO consistent with the loop iterating while V MOVED between
+passes, so runs 1-3 corrupted other elements and we see only the first fault. A
+paniclog reports one site. The stable-V argument (R97.5/R97.8: IOFree dominates
+all exits, kalloc.1664 non-caching, LIFO reuse) is well founded and their SS64.2
+says the per-CPU magazines are LIFO too, so V should repeat on either path - but
+"should" is not "did", and R112 is recent enough that I am not going to promote
+the inference to an observation.
+
+R115.6  RECIPE Y: make the CD FIELD ITSELF the run counter.
+-------------------------------------------------------------------------------
+Equal reaches cannot separate "stopped" from "V moved", and banding with
+DECREASING reach puts the CD fields in run 0's exclusive band - which would
+report run 0 no matter what. So Y uses *** INCREASING *** reach in 384-byte
+steps. Later runs start deeper and therefore cover a SHALLOWER slice:
+
+    run 0  reach 1671  covers element-1 offsets 0..1535
+    run 1  reach 2055  covers                   0..1151
+    run 2  reach 2439  covers                   0..767
+    run 3  reach 2823  covers                   0..383
+
+Offsets 0..383 contain CD+0x04 (32) and CD+0x2c (72), so *** those fields carry
+the HIGHEST run that executed ***, and the deeper bands cross-check it:
+384..767 should read run 2, 768..1151 run 1, 1152..1535 run 0. The tile words
+self-locate, so one recovered word gives both its run and its depth, and a
+PARTIAL advance becomes distinguishable from a full one - which equal reaches
+could never show.
+
+Decision rule fixed in advance:
+  CD fields read run 3            -> the loop survives poisoned runs; Recipe X's
+                                     result was V movement.
+  CD fields read run 0 AND the deeper bands also read run 0
+                                  -> a poisoned run genuinely ends the sequence,
+                                     and R115.4(a/b/c) is the whole game.
+  CD fields read run 1 or 2       -> partial advance; read the band map for where
+                                     it stopped.
+
+
+================================================================================
+R116. *** RECIPE Y: RUN 0 AGAIN. "Loop continued with a stable V" is ELIMINATED;
+      two hypotheses remain. But Y confirmed CD at element+0x1c at a NEW heap
+      address, showed the 1508-byte CS blob neighbour is REPRODUCIBLE, and hinted
+      that far is STEERABLE across 4 GB. ***
+================================================================================
+
+Job 731 armed, job 732 pulled the log. Crash before the setup chime. Slide
+0x14c00000, distinct from all ten priors -> FRESH.
+
+R116.1  THE READING, and the arithmetic behind it.
+-------------------------------------------------------------------------------
+    panic: Unexpected fault in kernel static region
+           at pc 0xfffffff01c67fb84, lr 0xfffffff01c3095b0
+    esr 0x96000006 (same as X: data abort, translation fault, READ)
+    far 0xfffffff03953682c                       pid 45: watchdogd
+
+    pc - slide = 0xfffffff007a7fb84 = `ldr w4,[x17]` - THE SAME SCATTER-WALK LOAD
+
+    x10 0xfffffff0014d6780  blob start = THE ELEMENT BELOW V
+    x12 0xfffffff0014d679c  CD base
+    x9  0xfffffff0014d6d64  blob end        x11 0x5e4 = 1508  blob length
+    x16 0x38060090          scatterOffset, read BIG-endian
+    x14 0x48060090          BE read at element offset 56
+    x8  0x4a610644          our w3, depth 1604, read natively
+
+  x12 + x16 = 0xfffffff0014d679c + 0x38060090 = 0xfffffff03953682c = far, EXACT.
+  x12 - x10 = 0x1c = 28.   x9 - x10 = 0x5e4 = x11.   V = 0xfffffff0014d6e00.
+
+Decoding x16 against w2(n, depth 1592), stored LE and read BE:
+
+    run 0 -> 0x38060090   <<< OBSERVED
+    run 1 -> 0x38061091
+    run 2 -> 0x38062092
+    run 3 -> 0x38063093
+
+x14 agrees independently at element offset 56 (depth 1608). The Y ruler fix
+(R116.5) reads exactly: w2 at depth 1592 sits at element offset 1664-1592 = 72 =
+CD+0x2c, and w2 at depth 1608 at offset 56. No +8 correction needed anywhere.
+
+R116.2  WHAT IS NOW ELIMINATED, AND WHAT IS NOT.
+-------------------------------------------------------------------------------
+Y's whole point was that INCREASING reach makes the last-executed run's content
+cover the CD fields in every case, so x16 IS the run counter:
+
+    last run 0 -> x16 = 0x38060090, content band 0..1535   <<< OBSERVED
+    last run 1 -> x16 = 0x38061091, content band 0..1151
+    last run 2 -> x16 = 0x38062092, content band 0..767
+    last run 3 -> x16 = 0x38063093, content band 0..383
+
+  *** ELIMINATED: "the loop iterated AND V was stable." *** That hypothesis
+  predicted 0x38063093 uniquely, and it is not what the kernel read.
+
+  STILL OPEN, and Y does not separate them:
+    (a) the loop STOPS after a poisoned run;
+    (b) the loop ITERATES but V MOVES between passes, so runs 1-3 corrupted
+        other elements and we only ever see run 0's casualty.
+  Both predict exactly 0x38060090.
+
+Weak evidence for (a) over (b): under (b) with four runs writing four different
+elements, the first fault should come from run 0 only about a quarter of the
+time, and we have seen run 0 twice running (X and Y) -> ~1/16 if uniform. That
+is suggestive, NOT a result, and I am not going to treat it as one. The
+stable-V argument (R97.5/R97.8 IOFree-dominates + kalloc.1664 non-caching, and
+their SS64.2 that magazines are LIFO too) favours (a) as well, but "should
+repeat" is not "did repeat".
+
+R116.3  *** A DESIGN FLAW IN Y THAT I SHOULD HAVE CAUGHT BEFORE SPENDING THE
+        BOOT: the second reading was never OBSERVABLE. ***
+-------------------------------------------------------------------------------
+mkrecipeY.py promised a cross-check "independent of the CD field": the
+content/padding boundary in the element below V (offsets 0..1535 tile vs
+0..383 tile + padding above). That boundary does exist in memory - but *** the
+paniclog never reports those bytes. *** It reports the three shallow words near
+the CD (element offsets 56, 60, 72) and nothing else, and all three lie inside
+run 0's content band under EVERY hypothesis.
+
+So Y shipped with one reading, not two, and I wrote the second into the recipe's
+docstring and the arming script as though it were a measurement.
+
+RULE (JOB-PREFLIGHT): before spending a boot, check that each discriminator is
+REPORTABLE by the channel we will actually read, not merely present in memory.
+"The bytes differ" is not a discriminator; "the paniclog prints bytes that
+differ" is. This is a new member of the instrument-vs-pod family: nineteen of
+twenty earlier jobs measured our instruments, and this one measured a quantity
+the instrument cannot see.
+
+R116.4  WHAT Y GAVE US ANYWAY - three things, all independent of the run count.
+-------------------------------------------------------------------------------
+(1) *** CD AT element+0x1c, FOURTH CONFIRMATION, AT A NEW ADDRESS AND SLIDE. ***
+    X: element 0xfffffff060add100, slide 0x06200000, x12-x10 = 28.
+    Y: element 0xfffffff0014d6780, slide 0x14c00000, x12-x10 = 28.
+    Different heap region, different slide, same 28. The geometry is STRUCTURAL.
+    This is the claim R105.3 reached by a coincidence fit and that I retracted in
+    R108.2; it is now measured twice from registers.
+
+(2) *** THE NEIGHBOUR IS REPRODUCIBLE. *** blob length x11 = 0x5e4 = 1508 in
+    BOTH boots. V's lower neighbour is a 1508-byte code-signing blob two for
+    two under the reach-1671 geometry. R110 found the lower neighbour FREE in 6
+    of 7 records and R110.4 recommended pausing the vptr lottery on that basis;
+    the new geometry appears to land on a LIVE forge target reliably instead.
+    Two samples - not a rate - but it is the first repeatable live neighbour the
+    project has had.
+
+(3) A HINT, flagged as a hint. The panic STRING changed - X said "Kernel data
+    abort", Y said "Unexpected fault in kernel static region" - from the SAME
+    instruction with the SAME esr. The only difference is where far landed. Since
+    far = CD_base + scatterOffset and scatterOffset is a full 32 bits of ours,
+    *** we can steer that read across a ~4 GB window above CD_base, and the
+    handler distinguishes where it lands. *** That is not a read primitive: I do
+    not know that the loaded w4 is observable, and the walk may fault before
+    using it. But it is the first sign the channel might do more than fault, and
+    it bears directly on their SS61 non-fatal-oracle work - with the difference
+    that this path PANICS, where SS61's copyio family returns EFAULT.
+
+R116.5  TWO BUILDER FIXES THAT WORKED.
+-------------------------------------------------------------------------------
+* The tile now labels EVERY WORD WITH ITS OWN DEPTH. Recipe X labelled each word
+  with its group's depth, so the w2 - 8 bytes into the group - was labelled 8
+  bytes deeper than it lay. I logged that exact trap in R107 and walked into it
+  again; the builder assertion caught it (expected 0x90000638, got 0x90000640).
+  Fixed at the source rather than by adjusting the expectation. Y's decode needed
+  no correction anywhere.
+* SIZE_BASE 0x3000 -> 0xA000, closing R114.5's bit-12 overlap. w1's run field is
+  now recoverable, giving a THIRD independent run carrier beside w2 and the vptr.
+
+R116.6  AND A DECODER BLIND SPOT THAT ONLY A POSITIVE CONTROL FOUND.
+-------------------------------------------------------------------------------
+Re-running decodeX.py against the RECIPE X boot - as a positive control, after
+adding Recipe Y to its table - returned "cannot tell which recipe". The X boot's
+run index arrived in x16/x14 as *** BYTE-SWAPPED *** words, because every CD
+field is read big-endian, and classify() only tested the native little-endian
+word. I had decoded X by hand and never through the instrument, so the gap was
+invisible until the control ran.
+
+Fixed: each 32-bit half is now tested natively AND byte-swapped, labelled "BE".
+Re-regressed afterwards because byte-swapping doubles the match surface: zero
+false positives across all ten prior paniclogs, correct positive on X (recipe X,
+run 0) and on Y (recipe Y, run 0), and all four Y runs identified in synthetic
+controls from three carriers each (w2 native, w2 BE, the vptr, plus w1).
+
+The lesson is the one R114.9 already stated and this makes concrete: an
+instrument validated only on negatives is not validated. The nine prior logs all
+correctly produced "no run", which proved nothing about whether it could ever
+SAY a run.
+
+R116.7  NEXT - and deliberately NOT another guess at (a) vs (b).
+-------------------------------------------------------------------------------
+(a) is answerable offline from the disassembly (R115.4's three candidates: a
+status from the oversized provider read, w26, or compressedLength feeding the
+consumed-sector arithmetic). That question is with them. Burning a boot per guess
+is the wrong trade when the answer is derivable.
+
+So the next boot should be the *** NVRAM PERSISTENCE TEST *** (R114.6,
+nvpersist.sh): plant one variable, cold boot, count. Cheap, independently
+gating - their SS37/SS63 groom arithmetic has nothing under it if NVRAM does not
+survive a power cycle, and R114.6 showed all sixteen variables vanished - and it
+does not compete with the offline question.
+
+A V-stability test that WOULD separate (a) from (b) is drafted but not queued:
+poison the runs at sectors 0 and 1 with DIFFERENT tags. Those are two SEPARATE
+read() calls (R97: roundup(512, blockSize) -> two 512-byte header reads), so each
+allocates its own victim. If the element reports sector 1's tag, V is stable
+across calls and (a) follows; if sector 0's, V movement is real. Risk to weigh
+first: poisoning sector 0 replaces the protective MBR with stream bytes, and the
+prober may bail before reading sector 1 - which would make the boot
+uninformative in exactly the R116.3 way. Check reportability BEFORE queueing it.
+
+
+================================================================================
+R117. *** A RAMDISK NVRAM WRITE DOES NOT SURVIVE A COLD BOOT. The NVRAM groom is
+      retired as a mechanism for an untether, and R114.6's vanished sixteen are
+      explained. *** Plus the script bug that nearly voided the measurement.
+================================================================================
+
+R117.1  THE MEASUREMENT.
+-------------------------------------------------------------------------------
+Job 733 planted ONE variable, nfp00, 1664 bytes of 0xFF, in the ramdisk:
+
+    variable count before : 10
+    value bytes    : 1664 (expect 1664)
+    nfp00 present  : 1
+    nfp00 readback : 4993 chars        <- 1664*3 + 1, matching nvspray exactly
+
+the author cold booted (crash before chime, as Recipe Y is still armed), pulled power,
+re-entered DFU. Job 734 then reported, BEFORE touching anything:
+
+    variable count before : 10
+    (no BASELINE MISMATCH line, so all ten baseline names were present)
+
+Ten, with all ten baseline names accounted for. nfp00 would have made eleven.
+
+    *** nfp00 WAS ABSENT. A ramdisk NVRAM write does not reach the next boot. ***
+
+R117.2  CONSEQUENCE: THE NVRAM GROOM CANNOT BE PART OF AN UNTETHER.
+-------------------------------------------------------------------------------
+An untether must come up after the pod is unplugged - a DIRTY power loss, by
+definition. A groom that does not survive a dirty power loss cannot be planted
+in advance, however it is sized. So:
+
+  * their SS37 NVRAM groom, SS63's "own many chunks" sizing, and SS63.5's boot
+    budget all rest on a mechanism that does not hold. The ELEMENT ARITHMETIC in
+    those sections is not wrong; it has nothing under it.
+  * R114.6's three candidates are resolved in favour of (a)/(b): the sixteen
+    nfg variables were not pruned and were not over budget. They never persisted.
+  * *** their SS64.3 plist-teardown route is now the ONLY grooming primitive we
+    have. *** It allocates and frees IN-BOOT from a plist we author, so it needs
+    no persistence at all. It moves from "an upgrade we may be able to switch on"
+    to the whole game, and with it the SS64.5 question (is kalloc.1664 cached?)
+    becomes the gating offline item - ahead of SS63.6's chunk contiguity, which
+    I will not spend a boot on.
+
+HONEST LIMIT, stated because it is a real gap and not a quibble: this tested
+plant -> cold boot -> crash -> power pull. It does NOT separate
+  (a) the write never reached NOR, from
+  (b) it reached NOR and the dirty power loss lost it.
+For the untether the distinction is moot - the dirty loss is exactly the case we
+need - but if it ever matters, the clean test is to read the NVRAM NOR partition
+directly after planting, with no boot at all. One sample so far; nfp00 is
+currently re-planted and job 735 is queued to replicate on the next cold boot.
+
+R117.3  *** THE SCRIPT BUG THAT NEARLY VOIDED IT: pod-sh PASSES NO ARGUMENTS. ***
+-------------------------------------------------------------------------------
+The job line was `pod-sh multipod/route2/nvpersist.sh check`. The runner does:
+
+    pod_ssh 'sh -s' < "$f"
+
+The script arrives on STDIN. There are NO positional arguments, so `$1` was
+empty, the `case "$1"` dispatch took its DEFAULT branch, and job 734 ran the
+PLANT half when it was asked for the CHECK half - *** re-planting the variable
+whose absence it was there to measure. ***
+
+JOB-PREFLIGHT already recorded "Scripts arrive on `sh -s` via stdin" - in the
+context of here-docs eating the rest of the script. I had read that line and
+never connected it to argument passing.
+
+What rescued the run: the plant branch prints `variable count before` as its
+first action. That line is the measurement. *** Printing state BEFORE acting is
+what turned an unusable run into a readable one *** - the single most useful
+habit in this project, and the reason the R114.6 count was available at all.
+
+Fixes: the check half now lives in nvpcheck.sh, argument-free. Every other pod
+script was scanned for `$1` usage - only nvpersist.sh had it, now single-mode.
+New JOB-PREFLIGHT rule (R117): one mode per file, never a `case "$1"` dispatch
+in a pod script, and read what the script PRINTED rather than what the job line
+asked for.
+
+This is the seventh member of the silent-decline family, and the first where the
+silent decliner was MY OWN DISPATCH rather than a tool: grep declining binary
+input (R98), the R97.4 unsatisfiable back-edge scan, the bare except, the
+/dev/disk4 write discarded, R101.5's loose hex pattern, decodeX.py's dead w1 test
+and native-only matching (R116.6), and now a case statement that answered a
+question nobody asked.
+
+
+================================================================================
+R118. *** THE ANSWER: AN INPUT/OUTPUT OVERLAP GUARD. The inflate is NEVER CALLED
+      for a poisoned run. A run that writes can NEVER return status 0, so there
+      is EXACTLY ONE overflow write per read() call - structurally, with no
+      payload fix. The N-writes-per-boot model is retired. ***
+================================================================================
+
+R118.1  THE GUARD, from the wrapper's own first instructions.
+-------------------------------------------------------------------------------
+The call at 0xdcb6bc passes:
+
+    0xdcb6ac  ldr x3, [sp,#0x58]   ; x3 = L   = compressedLength   (input LENGTH)
+    0xdcb6b0  add x1, sp, #0x48    ; x1 = &outlen
+    0xdcb6b4  mov x0, x20          ; x0 = out = buf = V            (OUTPUT)
+    0xdcb6b8  mov x2, x19          ; x2 = in  = dst = bufEnd - L   (INPUT)
+    0xdcb6bc  bl  0xfffffff007dcdd08
+
+and 0xdcdd08's first act, before touching the stream:
+
+    0xdcdd5c  cmp  x20, x25        ; in vs out
+    0xdcdd60  b.hs 0xdcdd7c        ; in >= out -> clamped in-place path
+    0xdcdd64  add  x8, x20, x21    ; in_end = in + L
+    0xdcdd68  sub  x8, x8, #1      ; last input byte
+    0xdcdd6c  cmp  x8, x25
+    0xdcdd70  b.hs 0xdcdfd8
+    0xdcdfd8  mov  w0, #0x3e8      ; *** return 1000, inflate NEVER called ***
+
+Substitute the primitive's own geometry (in = bufEnd - L, out = buf):
+
+    in < out        <=>  bufEnd - L < buf   <=>  L > allocSize  <=> THE OVERFLOW
+    last_in = in + L - 1 = bufEnd - 1 >= buf = out               <=> ALWAYS TRUE
+
+  *** So EVERY run with L > allocSize returns 0x3e8 from the overlap guard. The
+      test is on POINTER RANGES, not on stream contents. ***
+
+The other branch (in >= out, i.e. L <= allocSize) is the ordinary in-place case:
+it clamps avail_out = in - out (0xdcdd98), initialises zlib - inflateInit2_ at
+0xb68364 with the version string "1.2.3" and stream_size 0x70 - and decompresses
+normally. That is the path every BENIGN run takes.
+
+R118.2  *** THE CONSTRAINT, AND IT IS MUTUAL EXCLUSION. ***
+-------------------------------------------------------------------------------
+    a successful inflate requires   L <= allocSize
+    an overflow write requires      L >  allocSize   (dst = bufEnd - L < buf)
+
+  *** A RUN THAT WRITES CAN NEVER RETURN STATUS 0. ***
+
+Therefore, per read() call: any number of benign runs, then AT MOST ONE poisoned
+run, which is always the last run executed in that call. Their SS65 instruction
+path is right that a nonzero status frees V and returns from read() immediately;
+what it mis-attributes is WHY the status is nonzero.
+
+This explains every recipe we have flown, with no free parameters:
+
+    O run1  L=40    benign   -> in >= out, clamped path, status 0, LOOP CONTINUES
+    O run2  L=5632  poisoned -> guard, 0x3e8, read() returns. O's HIT is run 2's
+                                write, which had already landed. ONE write.
+    P run1  L=5632  poisoned, RAW bytes    -> guard. (Never about the raw bytes.)
+    X runs  L=3207  poisoned, VALID zlib   -> guard. Payload validity irrelevant.
+    Y run0  L=3207  poisoned, VALID zlib   -> guard. Same, at a different reach.
+
+R118.3  WHAT THIS RETIRES.
+-------------------------------------------------------------------------------
+* R98's "no iteration cap, so we may take as many writes per boot as we care to
+  place runs" - true about the LOOP, false about the WRITES.
+* R99.1 and R104.3's N-writes-per-boot arithmetic, and the 256/N kslide
+  amortisation built on it (R111.2). N is not author-controlled via nEnt x eSz.
+* their SS62's "N is bounded by nEnt x eSz (via R)" - bounded by 1, in fact.
+* their SS65's proposed unblock, "the unblock is payload construction, not a new
+  primitive: stored blocks for arbitrary bytes, zero-length stored blocks to pad
+  compressedLength to delta". That is precisely zstream.py, already built (R113)
+  and flown twice (X, Y). *** No payload construction can satisfy a guard that
+  never reads the payload. ***
+* *** their SS66 experiment is VOID and must not be flown. *** It reads the
+  magazine regime off "run 2 advances with no cookie panic => cached". Run 2
+  cannot advance under EITHER regime, so the experiment returns "uncached"
+  whatever the truth is. A null instrument - the same reportability failure as
+  R116.3, and the reason that rule now exists.
+
+WHAT SURVIVES, and it is the valuable half of their note: free_to_zone is the
+ONLY place the free-list cookie is stamped (0xfffffff008731da0, XOR'd into
+element offset 0 and offset size-8, matching R104's head/tail measurement), and
+the cached free path skips free_to_zone entirely (0x6d2bac b 0x6d2ef4). So
+R104.3's precondition generalises: the elements below V need only be OFF THE
+FREELIST, not live. Magazine-resident freed elements are equally canary-free.
+That needs no persistence, which is the right answer to R117's NVRAM retirement.
+
+R118.4  THE HONEST ACCOUNTING: TWO BOOTS SPENT ON A PREMISE THE DISASSEMBLY
+        WOULD HAVE REFUTED.
+-------------------------------------------------------------------------------
+R112 attributed Recipe P's stall to the status gate at 0xdcb5ec and concluded
+"every run must be a valid zlib stream". That inference came from the gate's
+existence plus the observation, and it was reasonable - but nobody disassembled
+0xdcdd08, the function whose status we were theorising about. One pass over the
+callee would have shown the overlap guard and refuted the premise before
+zstream.py was written.
+
+Instead: zstream.py (R113, two days of length algebra), Recipe X (R114/R115, one
+boot), Recipe Y (R116, one boot), all aimed at satisfying a gate that was never
+the binding constraint. The work is not wasted - valid streams are still required
+for BENIGN runs, and X and Y produced R115.2's register-measured CD geometry,
+R116.4's reproducible 1508-byte neighbour, and the leak channel twice - but the
+question they were built to answer was answerable offline the whole time.
+
+RULE (JOB-PREFLIGHT): when the question is "why did this call fail",
+*** DISASSEMBLE THE CALLEE, not the code around it. *** We had the kernelcache
+and capstone the entire time. The status gate at 0xdcb5ec tells you a status is
+checked; only 0xdcdd08 tells you what sets it.
+
+R118.5  WHERE THE WRITES HAVE TO COME FROM NOW.
+-------------------------------------------------------------------------------
+Not more runs - more read() CALLS. Each is a fresh IOMalloc/IOFree cycle and so a
+fresh (LIFO-identical) V, and each can carry exactly one poisoned run as its last
+executed run. Known plural call sites:
+  * the GPT header probe: TWO 512-byte reads at sectors 0 and 1 (R97).
+  * the partition-entry array read (READ #2).
+  * whatever the OTHER partition schemes probe - IOFDiskPartitionScheme and
+    IOApplePartitionScheme each run their own probe, each with its own reads.
+So the first question is a COUNT: how many separate read() calls does one boot
+make against our image, and how many can be made to end on a poisoned run? That
+is answerable offline from the probe code plus the scheme list, and it replaces
+"N runs per boot" as the quantity that sets the boot budget.
+
+Also usable, from their SS65: x22 is untouched on the stop path, so a failing run
+consumes no sector budget; and x28 - sectors actually transferred before the stop
+- is written to the caller's out-param at 0xdcb91c. The CALLER therefore sees a
+short transfer directly, with no paniclog needed. Whether a short count makes the
+prober retry or move on is the mechanism that decides whether one call can be
+made to yield more than one write.
