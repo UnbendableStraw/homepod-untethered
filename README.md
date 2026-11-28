@@ -1,6 +1,8 @@
 # homepod-untethered
 
-Research notes, reverse-engineering findings, and hardware experiments toward **untethered unsigned code execution** on the 1st-generation Apple HomePod (**A1639** / `AudioAccessory1,1` / `b238a`, Apple A8 `T7000`).
+Poorly organized research notes, reverse-engineering findings, and hardware experiments toward **untethered unsigned code execution** on the 1st-generation Apple HomePod (**A1639** / `AudioAccessory1,1` / `b238a`, Apple A8 `T7000`).
+
+Largely a dump of my running notes. Still looking for help / contributions!
 
 Today, running custom software (such as Linux / Nicotine or an SSH ramdisk) on a 1st-gen HomePod is **tethered**: every cold power-up requires a USB host to trigger `checkm8` in SecureROM DFU. This repository documents the ongoing campaign to close the persistence gap across a cold boot with **no host attached**.
 
